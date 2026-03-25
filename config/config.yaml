@@ -1,0 +1,33 @@
+data_manager:
+  data_path: data/raw.csv
+  date_column: market_data_publication_date
+  target_col: monthly_return
+  convert_target_to_rank: true
+  train_start: 2005-01-01
+  train_end: 2015-12-31
+  val_start: 2016-01-01
+  val_end: 2020-12-31
+  test_start: 2021-01-01
+  test_end: 2025-12-31
+  exclude_cols:
+    - stock_id
+    - ticker_symbol
+    - market_data_publication_date
+    - publication_date
+    - fiscal_quarter_end_date
+
+model:
+  objective: rank:pairwise
+  num_rounds: 100
+  learning_rate: 0.1
+  max_depth: 5
+  subsample: 0.8
+  colsample_bytree: 0.8
+  random_state: 42
+  ndcg_exp_gain: false
+  verbosity: 0
+  params: {}
+
+pipeline:
+  plots_dir: generated/plots
+  top_k_preview: 10
