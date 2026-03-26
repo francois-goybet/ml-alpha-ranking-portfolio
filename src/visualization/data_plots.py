@@ -452,8 +452,10 @@ def plot_summary_statistics(
     Returns:
         Plotly Figure with table
     """
-    # Round values for display
-    display_df = stats_df.round(4)
+    # Add explicit feature names (index) as a column for readability.
+    display_df = stats_df.copy()
+    display_df.insert(0, "feature", display_df.index)
+    display_df = display_df.reset_index(drop=True).round(4)
 
     fig = go.Figure(
         data=[
@@ -611,4 +613,103 @@ def plot_return_percentiles(
         height=500,
     )
 
+    return fig
+
+
+def plot_stock_ranking_evolution(
+    df: pd.DataFrame,
+    ticker_symbol: str,
+    date_column: str = "market_data_publication_date",
+    target_col: str = "monthly_return",
+    title: Optional[str] = None,
+) -> go.Figure:
+    """
+    Plot the ranking evolution of a single stock over time.
+    
+    For each month, the stock is ranked among all stocks in that month
+    (based on monthly_return), with rank 1 being the best performer.
+
+    Args:
+        df: Input DataFrame
+        ticker_symbol: Ticker symbol to track (e.g., 'TSLA')
+        date_column: Column name for date
+        target_col: Target column name (for ranking)
+        title: Plot title (defaults to stock name)
+
+    Returns:
+        Plotly figure
+    """
+    if title is None:
+        title = f"Ranking Evolution: {ticker_symbol}"
+    
+    df_copy = df.copy()
+    df_copy[date_column] = pd.to_datetime(df_copy[date_column])
+    df_copy["year_month"] = df_copy[date_column].dt.to_period("M")
+    
+    # Filter for the given ticker
+    stock_data = df_copy[df_copy["ticker_symbol"] == ticker_symbol].copy()
+    
+    if stock_data.empty:
+        # Return empty figure with error message
+        fig = go.Figure()
+        fig.add_annotation(text=f"No data found for ticker {ticker_symbol}")
+        return fig
+    
+    # Rank stocks within each month (ascending ranking: 1 is best)
+    # Handle NaN returns by excluding them from ranking
+    monthly_rankings = []
+    
+    for month, group in df_copy.groupby("year_month"):
+        # Only rank rows with non-null returns
+        group_valid = group[group[target_col].notna()].copy()
+        
+        if group_valid.empty:
+            continue
+        
+        # Rank in descending order of return (higher return = lower rank number)
+        group_valid["rank"] = group_valid[target_col].rank(method="min", ascending=False)
+        
+        # Extract the rank for this stock in this month
+        stock_row = group_valid[group_valid["ticker_symbol"] == ticker_symbol]
+        
+        if not stock_row.empty:
+            rank = stock_row["rank"].values[0]
+            monthly_rankings.append({
+                "year_month": month.astype(str),
+                "rank": rank,
+                "return": stock_row[target_col].values[0],
+            })
+    
+    if not monthly_rankings:
+        fig = go.Figure()
+        fig.add_annotation(text=f"No ranking data found for ticker {ticker_symbol}")
+        return fig
+    
+    ranking_df = pd.DataFrame(monthly_rankings)
+    
+    fig = go.Figure()
+    
+    fig.add_trace(
+        go.Scatter(
+            x=ranking_df["year_month"],
+            y=ranking_df["rank"],
+            mode="lines+markers",
+            name=ticker_symbol,
+            line=dict(width=2),
+            marker=dict(size=6),
+            text=ranking_df["return"],
+            hovertemplate="<b>%{x}</b><br>Rank: %{y}<br>Return: %{text:.4f}<extra></extra>",
+        )
+    )
+    
+    fig.update_layout(
+        title=title,
+        xaxis_title="Month",
+        yaxis_title="Rank (1 = best performer)",
+        hovermode="x unified",
+        template="plotly_white",
+        height=500,
+        yaxis=dict(autorange="reversed"),  # Invert y-axis so rank 1 is at top
+    )
+    
     return fig

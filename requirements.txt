@@ -2,6 +2,7 @@ numpy
 pandas
 scikit-learn
 plotly
+nbformat>=4.2.0
 matplotlib
 seaborn
 xgboost
