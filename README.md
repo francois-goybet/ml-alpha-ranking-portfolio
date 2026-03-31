@@ -1,76 +1,83 @@
 # ml-alpha-ranking-portfolio
 
-This project builds a leakage-aware stock ranking pipeline for monthly alpha prediction.
+This project aims to build an alpha-ranking pipeline for equities.
 
-The workflow is split into two parts:
-1. Run the notebook to query, clean, and assemble the dataset.
-2. Run the Python pipeline to train the ranking model and generate plots and ranking diagnostics.
+At this stage, the data layer is already structured and configurable. The model and full training/evaluation pipeline are the next main focus.
 
-## Setup
+## Requirements
 
-### Create the Virtual Environment
-
-To create a virtual environment named `ml-alpha-ranking-portfolio`, run:
-
-```powershell
-python -m venv ml-alpha-ranking-portfolio
-```
-
-### Activate the Virtual Environment
-
-On Windows (PowerShell):
-
-```powershell
-.\ml-alpha-ranking-portfolio\Scripts\Activate.ps1
-```
-
-### Install Requirements
-
-Once the virtual environment is activated, install the required packages:
+Install dependencies from [requirements.txt](requirements.txt):
 
 ```powershell
 pip install -r requirements.txt
 ```
 
-Alternatively, you can install the packages individually:
+## Virtual Environment
+
+Create a local virtual environment:
 
 ```powershell
-pip install numpy pandas scikit-learn plotly matplotlib seaborn xgboost
+python -m venv ml-alpha-ranking-portfolio
 ```
 
-## Workflow
+Activate it on Windows PowerShell:
 
-### 1. Build the dataset from the notebook
+```powershell
+.\ml-alpha-ranking-portfolio\Scripts\Activate.ps1
+```
 
-Run [notebook/notebook1.ipynb](notebook/notebook1.ipynb).
+Then install the requirements:
 
-The notebook is responsible for:
-- querying the raw market and fundamentals data,
-- merging them into a point-in-time dataset,
-- producing the CSV used by the training pipeline.
+```powershell
+pip install -r requirements.txt
+```
 
-In practice, it is enough to run `notebook1.ipynb` to generate the data needed by the project.
+## Current Data Architecture
 
-### 2. Run the training pipeline
+The data module is organized around three classes:
 
-Once the dataset has been created by the notebook, run:
+1. `WRDSDataLoader` in [src/data/WRDSDataLoader.py](src/data/WRDSDataLoader.py)
+- Responsibility: retrieve and merge raw datasets from WRDS.
+- Contains source-specific methods (example stubs: price data, fundamentals data).
+
+2. `FeatureBuilder` in [src/data/feature_builder.py](src/data/feature_builder.py)
+- Responsibility: transform merged raw data into feature-enriched data.
+- Includes one toy example function: `rolling_price`.
+
+3. `DataManager` in [src/data/DataManager.py](src/data/DataManager.py)
+- Responsibility: orchestrate data loading and feature construction.
+- Instantiates both `WRDSDataLoader` and `FeatureBuilder`.
+- Exposes a single `build_dataset(source=...)` entry point.
+
+## Configuration
+
+Main configuration lives in [config/config.yaml](config/config.yaml) with three sections:
+
+1. `data`
+- Data-level settings (for example CSV path and date ranges).
+
+2. `model`
+- Model hyperparameters and training options.
+
+3. `pipeline`
+- Pipeline-level behavior.
+- `rebuild_dataset: true` means rebuild from WRDS.
+- `rebuild_dataset: false` means read the existing CSV.
+
+Config parsing is handled in [src/config/config_loader.py](src/config/config_loader.py), and consumed by [main.py](main.py).
+
+## Run
+
+Run with:
 
 ```powershell
 python .\main.py --config config/config.yaml
 ```
 
-This script will:
-- load the YAML configuration,
-- split the dataset into train/validation/test periods,
-- generate data exploration plots,
-- train the XGBoost pairwise ranking model,
-- export model diagnostics,
-- export monthly ranking tables for the test period.
+## Next Priorities
 
-## Outputs
+Now that the data structure is in place, attention should move to:
 
-The pipeline saves its outputs under [generated/plots](generated/plots):
-- data description plots,
-- model training plots,
-- feature importance plots,
-- HTML tables and CSV files for monthly test rankings.
+1. Model training flow (fit/predict/evaluation integration).
+2. Pipeline outputs and reporting.
+3. End-to-end robustness (error handling, reproducibility, and tests).

@@ -1,1 +1,1 @@
-"""Configuration utilities for loading and validating YAML settings."""
+"""Configuration utilities for loading and parsing YAML settings."""
