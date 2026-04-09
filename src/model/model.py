@@ -2,19 +2,99 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, Optional
+from abc import ABC, abstractmethod
 
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import shap
 
+try:
+    import lightgbm as lgb
+except ImportError:
+    lgb = None  # LightGBM is optional and only used for comparison
+    Warning.warn("LightGBM is not installed. Install it to use LightGBM-based models.")
+
+class BaseRankingModel(ABC):
+    """Abstract base for all learning-to-rank models."""
+    
+    def __init__(
+        self,
+        num_rounds: int = 100,
+        learning_rate: float = 0.1,
+        max_depth: int = 6,
+        subsample: float = 0.8,
+        colsample_bytree: int = 42,
+        random_state: int = 1234,
+        verbosity: int = 1,
+    ):
+        self.num_rounds = num_rounds
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.random_state = random_state
+        self.verbosity = verbosity
+    
+    @property
+    def is_fitted(self) -> bool:
+        return hasattr(self, "model_")
+
+    @abstractmethod
+    def fit(
+        self,
+        x: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+        groups: list[int] | np.ndarray,
+        eval_set: Optional[tuple] = None,
+        eval_groups: Optional[list[int]] = None,
+        verbose: bool = True,
+    ) -> BaseRankingModel: ...
+
+    @abstractmethod
+    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray: ...
+
+    @abstractmethod
+    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]: ...
+
+    @abstractmethod
+    def save_model(self, filepath: str) -> None: ...
+
+    @abstractmethod
+    def load_model(self, filepath : str) -> BaseRankingModel: ...
+
+    def get_shap_values(self, X: pd.Dataframe | np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        explainer = shap.TreeExplainer(self.model_)
+        return explainer.shap_values(X)
+
+    def get_params(self) -> dict:
+        return {
+            k: v for k,v in self.__dict__.items()
+            if not k.endswith("_") and not k.startswith("_")
+        }
+    
+    def get_training_history(self) -> Dict[str, Dict[str, list[float]]]:
+        return getattr(self, "training_history_", {}).copy()
+    
+    def set_params(self, **kwargs) -> BaseRankingModel:
+        if self.is_fitted:
+            warning.warn("setting params resets the model, call fit() again")
+            for attr in ("model_","feature_names_","training_history_"):
+                if hasattr(self, attr):
+                    delattr(self, attr)
+        for k,v in kwargs.items():
+            if not hasattr(self, k):
+                raise ValueError(f"Uknown parameter: {k}")
+            setattr(self, k, v)
+        return self
 
 class AlphaXGBoost:
     """
     Wrapper around XGBoost for learning-to-rank (LTR) stock ranking.
-
-    Uses pairwise loss (rank:pairwise) to predict stock rankings within groups
-    (e.g., monthly rankings based on expected returns).
 
     Attributes:
         model: Underlying XGBoost Booster object
