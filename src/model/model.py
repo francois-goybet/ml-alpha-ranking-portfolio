@@ -16,7 +16,10 @@ try:
 except ImportError:
     lgb = None
     warnings.warn("LightGBM is not installed. Install it to use LGBMRanker.")
-
+###
+# One thing to note is the parameter group needed for both xgboost and lightgbm ranker : 
+# basically you have to provide the model the indices corresponding to the same month so it knows what
+# group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
 class BaseRankingModel(ABC):
     """Abstract base for all learning-to-rank models."""
@@ -240,6 +243,82 @@ class XGBoostRanker(BaseRankingModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# Label encoders for LightGBM (requires integer grades per month)
+#
+# Input data is expected as a flat DataFrame with columns:
+#   permno  (stock id), yyyymm (period), ret (return), f1, f2, ... (features)
+# groups must be built AFTER encoding so row order is preserved:
+#   groups = df.groupby("yyyymm").size().tolist()
+# ---------------------------------------------------------------------------
+
+def encode_labels_quintile(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """
+    Encode continuous returns into quintile grades {0, 1, 2, 3, 4} computed
+    independently within each month (group).
+
+    Grade 4 = top 20% of returns that month, grade 0 = bottom 20%.
+    Ties are handled by assigning the lower grade (duplicates='drop' falls back
+    to fewer bins when a month has too few unique values).
+
+    Args:
+        y: Flat Series of continuous returns, same row order as X.
+        groups: Stock counts per month; sum(groups) must equal len(y).
+
+    Returns:
+        Integer ndarray of grades, same length as y.
+    """
+    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
+    out = np.empty(len(y_arr), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        chunk = pd.Series(y_arr[sl])
+        out[sl] = pd.qcut(chunk, q=5, labels=False, duplicates="drop").astype(np.int64)
+        cursor += g
+    return out
+
+
+def encode_labels_decile(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """
+    Same as encode_labels_quintile but uses 10 bins (deciles).
+    Grade 9 = top 10%, grade 0 = bottom 10%.
+    """
+    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
+    out = np.empty(len(y_arr), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        chunk = pd.Series(y_arr[sl])
+        out[sl] = pd.qcut(chunk, q=10, labels=False, duplicates="drop").astype(np.int64)
+        cursor += g
+    return out
+
+
+def encode_labels_binary(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """
+    Binary encoding: 1 if return >= median of the month, 0 otherwise.
+    Useful for simple top-half vs bottom-half ranking.
+    """
+    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
+    out = np.empty(len(y_arr), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        chunk = y_arr[sl]
+        out[sl] = (chunk >= np.median(chunk)).astype(np.int64)
+        cursor += g
+    return out
+
+
+# Registry so callers can select an encoder by name from config
+_LABEL_ENCODERS = {
+    "quintile": encode_labels_quintile,
+    "decile": encode_labels_decile,
+    "binary": encode_labels_binary,
+}
+
+
 class LGBMRanker(BaseRankingModel):
     """LightGBM learning-to-rank model."""
 
@@ -257,6 +336,11 @@ class LGBMRanker(BaseRankingModel):
         # --- LTR-specific ---
         lambdarank_truncation_level: int = 10,
         label_gain: Optional[list[float]] = None,
+        # label_encoder: how to convert continuous returns to integer grades.
+        # Built-in options: "quintile" (default), "decile", "binary".
+        # Pass a callable f(y, groups) -> np.ndarray for a custom scheme.
+        # Set to None to skip encoding (y must already be integer grades).
+        label_encoder: str | callable | None = "quintile",
     ):
         super().__init__(
             num_rounds=num_rounds,
@@ -273,6 +357,7 @@ class LGBMRanker(BaseRankingModel):
         # label_gain maps integer relevance grades to NDCG gain values
         # default None lets LightGBM use its built-in [0,1,3,7,15,...]
         self.label_gain = label_gain
+        self.label_encoder = label_encoder
 
     def _lgb_params(self) -> dict:
         params = {
@@ -305,21 +390,33 @@ class LGBMRanker(BaseRankingModel):
             raise ImportError("LightGBM is not installed.")
         feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
         X_arr = X.values if isinstance(X, pd.DataFrame) else X
-        y_arr = y.values if isinstance(y, pd.Series) else y
+        y_s = y if isinstance(y, pd.Series) else pd.Series(y)
 
-        # LightGBM ranking (lambdarank / rank_xendcg) requires INTEGER labels.
-        # Use quintile buckets per month: 0=bottom 20%, 4=top 20%.
-        # Example: y = df.groupby(date_col)[return_col].transform(
-        #              lambda x: pd.qcut(x, 5, labels=False, duplicates='drop'))
-        if not np.issubdtype(y_arr.dtype, np.integer):
-            warnings.warn(
-                "LGBMRanker expects integer labels (e.g. quintile grades 0-4). "
-                "Continuous returns will be cast to int64, which loses information. "
-                "Convert y to integer grades per month before calling fit().",
-                UserWarning,
-                stacklevel=2,
-            )
-            y_arr = y_arr.astype(np.int64)
+        # --- Encode continuous returns to integer grades if needed ---
+        # LightGBM ranking requires integer labels (higher = more relevant).
+        # label_encoder handles this automatically; set to None if y is already integers.
+        if self.label_encoder is not None:
+            if callable(self.label_encoder) and not isinstance(self.label_encoder, str):
+                encoder_fn = self.label_encoder
+            elif self.label_encoder in _LABEL_ENCODERS:
+                encoder_fn = _LABEL_ENCODERS[self.label_encoder]
+            else:
+                raise ValueError(
+                    f"Unknown label_encoder '{self.label_encoder}'. "
+                    f"Choose from {list(_LABEL_ENCODERS)} or pass a callable."
+                )
+            y_arr = encoder_fn(y_s, list(groups))
+        else:
+            y_arr = y_s.values
+            if not np.issubdtype(y_arr.dtype, np.integer):
+                warnings.warn(
+                    "label_encoder=None but y is not integer. "
+                    "LGBMRanker requires integer grades. "
+                    "Set label_encoder='quintile' or convert y manually.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                y_arr = y_arr.astype(np.int64)
 
         dtrain = lgb.Dataset(X_arr, label=y_arr, group=groups, feature_name=feature_names or "auto")
 
@@ -413,7 +510,8 @@ class MultiHorizonRanker:
     def _make_model(self) -> BaseRankingModel:
         if self.backend == "xgboost":
             return XGBoostRanker(**self.model_kwargs)
-        return LGBMRanker(**self.model_kwargs)
+        if self.backend == "lightgbm":
+            return LGBMRanker(**self.model_kwargs)
 
     @property
     def is_fitted(self) -> bool:
@@ -544,7 +642,7 @@ class HorizonEnsemble:
             stacked = np.stack(
                 [scores_per_horizon[t] for t in targets], axis=1
             )  # shape (n_stocks, n_horizons)
-            return stacked @ w_arr
+            return np.average(stacked, axis=1, weights=w_arr)
 
         # mean_rank: rank within each month, then average
         n = len(next(iter(scores_per_horizon.values())))
@@ -563,4 +661,4 @@ class HorizonEnsemble:
             else:
                 ranked = pd.Series(raw).rank(ascending=True).values
             all_ranks[:, col_idx] = ranked
-        return all_ranks @ w_arr
+        return np.average(all_ranks, axis=1, weights=w_arr)
