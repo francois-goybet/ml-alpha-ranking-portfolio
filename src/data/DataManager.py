@@ -4,6 +4,7 @@ from functools import reduce
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 _DATA_DIR = Path("data")
@@ -100,9 +101,132 @@ class DataManager:
 
         return final_df
 
+    def get_split(
+        self,
+        split: str,
+        targets: list[str] = ["ret_1m", "ret_3m", "ret_6m"],
+        start: str | None = None,
+        end: str | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
+        """Return (X, y, groups) for a single split with preprocessing.
+
+        Note: when using this method standalone, preprocessing is fitted and
+        applied on the same split (no look-ahead issue for a single split).
+        For proper train-fit / val-test-apply, use :meth:`get_train_val_test`.
+
+        Parameters
+        ----------
+        split:
+            One of ``"train"``, ``"val"``, ``"test"``.
+        targets:
+            List of target column names, e.g. ``["ret_1m", "ret_3m", "ret_6m"]``.
+        start:
+            Override start date (``YYYY-MM-DD``).  If None, uses config value.
+        end:
+            Override end date (``YYYY-MM-DD``).  If None, uses config value.
+
+        Returns
+        -------
+        X : pd.DataFrame
+            Preprocessed feature matrix, sorted by yyyymm then permno.
+        y : pd.DataFrame
+            Target DataFrame aligned with X.
+        groups : list[int]
+            Number of stocks per month; ``sum(groups) == len(X)``.
+        """
+        X, y, groups = self._get_raw_split(split, targets, start=start, end=end)
+        X = self._preprocess_features(X, fit=True)
+        return X, y, groups
+
+    def get_train_val_test(
+        self,
+        targets: list[str] = ["ret_1m", "ret_3m", "ret_6m"],
+    ) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, list[int]]]:
+        """Return train, val and test splits with preprocessing fit on train only.
+
+        Fits any transformation (scaling, imputation…) on the training set and
+        applies the same fitted transform to val and test — avoiding look-ahead
+        bias.
+
+        Returns
+        -------
+        dict with keys ``"train"``, ``"val"``, ``"test"``, each containing
+        ``(X, y, groups)``.
+        """
+        X_train, y_train, groups_train = self._get_raw_split("train", targets)
+        X_val,   y_val,   groups_val   = self._get_raw_split("val",   targets)
+        X_test,  y_test,  groups_test  = self._get_raw_split("test",  targets)
+
+        # Fit preprocessing on train, apply to all splits
+        X_train = self._preprocess_features(X_train, fit=True)
+        X_val   = self._preprocess_features(X_val,   fit=False)
+        X_test  = self._preprocess_features(X_test,  fit=False)
+
+        return {
+            "train": (X_train, y_train, groups_train),
+            "val":   (X_val,   y_val,   groups_val),
+            "test":  (X_test,  y_test,  groups_test),
+        }
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _get_raw_split(
+        self,
+        split: str,
+        targets: list[str],
+        start: str | None = None,
+        end: str | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
+        """Internal version of get_split — returns raw (unpreprocessed) X."""
+        if _DATASET_PARQUET.exists():
+            df = pd.read_parquet(_DATASET_PARQUET)
+        else:
+            raise FileNotFoundError(
+                "dataset.parquet not found. Call get_data() first."
+            )
+
+        start_date = start or self.data_config.get(f"{split}_start")
+        end_date = end or self.data_config.get(f"{split}_end")
+
+        if start_date is None or end_date is None:
+            raise ValueError(
+                f"No dates for split '{split}'. Pass start/end or set "
+                f"'{split}_start' / '{split}_end' in config."
+            )
+
+        start_ym = int(str(start_date).replace("-", "")[:6])
+        end_ym = int(str(end_date).replace("-", "")[:6])
+
+        df = (
+            df.loc[(df["yyyymm"] >= start_ym) & (df["yyyymm"] <= end_ym)]
+            .sort_values(["yyyymm", "permno"])
+            .reset_index(drop=True)
+        )
+
+        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+        feature_cols = [c for c in df.columns if c not in _META]
+
+        targets_list = [targets] if isinstance(targets, str) else list(targets)
+        df = df.dropna(subset=targets_list).reset_index(drop=True)
+        X = df[feature_cols]
+        y = df[targets]
+        groups = df.groupby("yyyymm").size().tolist()
+        return X, y, groups
+
+    def _preprocess_features(self, X: pd.DataFrame, fit: bool = False) -> pd.DataFrame:
+        """Clean the feature matrix before passing it to the ranker.
+
+        When ``fit=True`` (train set), compute and store any statistics needed
+        for the transform. When ``fit=False`` (val/test), apply the previously
+        fitted transform without recomputing anything.
+
+        Steps applied:
+          - replace ±inf with NaN
+        """
+        X = X.replace([np.inf, -np.inf], np.nan)
+        return X
 
     def _load_crsp(self, start: str, end: str, market_cap: float) -> pd.DataFrame:
         """Query CRSP monthly stock file from WRDS and compute lagged returns.
@@ -185,6 +309,8 @@ class DataManager:
         signals = signal_doc.Acronym.tolist()
 
         for i in tqdm(range(0, len(signals), _CHUNK_SIZE), desc="OpenAP batching"):
+            
+            print(f"Processing signals {i} to {min(i + _CHUNK_SIZE, len(signals))}...")
             batch = signals[i : i + _CHUNK_SIZE]
             feat = openap.dl_signal("pandas", batch)
 

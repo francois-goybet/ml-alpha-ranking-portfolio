@@ -3,25 +3,42 @@ import argparse
 from src.config.config_loader import load_config
 
 from src.data.DataManager import DataManager
-from src.model.model import AlphaXGBoost
-from src.visualization import data_plots
-from src.visualization import model_plots
+from src.model.model import MultiHorizonRanker
 
 def main(args):
 
     # Load configuration with lightweight parsing.
     config = load_config(args.config)
     data_manager = DataManager(config.get("data", {}))
-    pipeline_cfg = config.get("pipeline", {})
-    rebuild_dataset = bool(pipeline_cfg.get("rebuild_dataset", False))
+    data_manager.get_data(start=config["data"].get("train_start", "1990-01-01"), end=config["data"].get("test_end", "2024-12-31"), market_cap=config["data"].get("market_cap", 10))
+    s = data_manager.get_train_val_test(targets=["ret_1m", "ret_3m", "ret_6m"])
+    # print stats about the splits
+    for split_name, (X, y, group) in s.items():
 
-    source = "wrds" if rebuild_dataset else "csv"
-    dataset = data_manager.build_dataset(source=source)
+        print(f"{split_name}: {len(X)} samples, {len(X.columns)} features, {len(set(group))} groups.")
+        # print columns of y
+        print(f"  Targets: {y.columns.tolist()}")
+        # print number of nan values in y
+        print(f"  NaN values in targets: {y.isna().sum().to_dict()}")
+        # print firsts columns of X
+        print(f"  First 5 columns of X: {X.columns[:5].tolist()}")
+        # print group first 5 values
+        print(f"  First 5 group values: {group[:5]}")
+        # print size of the first group
+        print(f"  Size of first group: {group[0]}")
+        print()
+    X_train, y_train, group_train = s["train"]
+    X_val, y_val, group_val = s["val"]
+    X_test, y_test, group_test = s["test"]
 
-    print(f"Dataset source: {source} | rows: {len(dataset)}")
-    
+    # Check if some values in y_train are NaN (should not happen with current data loading, but just in case).
+    if y_train.isna().any().any():
+        print("Warning: NaN values found in y_train. This may cause issues during training.")
+        print(y_train.isna().sum())
 
-    pass
+    model = MultiHorizonRanker(targets=["ret_1m"], **config.get("model", {}))
+    model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=True)
+
 
 if __name__ == "__main__":
 
