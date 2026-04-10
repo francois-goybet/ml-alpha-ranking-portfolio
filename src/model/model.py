@@ -22,224 +22,10 @@ except ImportError:
 # group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
 class BaseRankingModel(ABC):
-    """Abstract base for all learning-to-rank models."""
-
-    def __init__(
-        self,
-        num_rounds: int = 100,
-        learning_rate: float = 0.1,
-        max_depth: int = 6,
-        subsample: float = 0.8,
-        colsample_bytree: float = 0.8,
-        random_state: int = 42,
-        verbosity: int = 0,
-    ):
-        self.num_rounds = num_rounds
-        self.learning_rate = learning_rate
-        self.max_depth = max_depth
-        self.subsample = subsample
-        self.colsample_bytree = colsample_bytree
-        self.random_state = random_state
-        self.verbosity = verbosity
-
-    @property
-    def is_fitted(self) -> bool:
-        return hasattr(self, "model_")
-
-    @abstractmethod
-    def fit(
-        self,
-        X: pd.DataFrame | np.ndarray,
-        y: pd.Series | np.ndarray,
-        # groups: one integer per query (month), equal to the number of stocks in that month.
-        # The ranker compares stocks WITHIN each group only, never across months.
-        # Must satisfy: sum(groups) == len(X).
-        # Build with: groups = df.groupby(date_col).size().tolist()
-        groups: list[int] | np.ndarray,
-        eval_set: Optional[tuple] = None,
-        eval_groups: Optional[list[int]] = None,
-        verbose: bool = False,
-    ) -> BaseRankingModel: ...
-
-    @abstractmethod
-    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray: ...
-
-    @abstractmethod
-    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]: ...
-
-    @abstractmethod
-    def save_model(self, filepath: str) -> None: ...
-
-    @abstractmethod
-    def load_model(self, filepath: str) -> BaseRankingModel: ...
-
-    def get_shap_values(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        if not self.is_fitted:
-            raise ValueError("Call fit() first.")
-        explainer = shap.TreeExplainer(self.model_)
-        return explainer.shap_values(X)
-
-    def get_params(self) -> dict:
-        return {
-            k: v for k, v in self.__dict__.items()
-            if not k.endswith("_") and not k.startswith("_")
-        }
-
-    def get_training_history(self) -> Dict[str, Dict[str, list[float]]]:
-        return getattr(self, "training_history_", {}).copy()
-
-    def set_params(self, **kwargs) -> BaseRankingModel:
-        if self.is_fitted:
-            warnings.warn("set_params on a fitted model resets it. Call fit() again.")
-            for attr in ("model_", "feature_names_", "training_history_"):
-                if hasattr(self, attr):
-                    delattr(self, attr)
-        for k, v in kwargs.items():
-            if not hasattr(self, k):
-                raise ValueError(f"Unknown parameter: {k}")
-            setattr(self, k, v)
         return self
 
 
 class XGBoostRanker(BaseRankingModel):
-    """XGBoost learning-to-rank model.
-
-    Supports rank:pairwise, rank:ndcg, rank:map objectives.
-
-    Key LTR parameters:
-        lambdarank_pair_method: "topk" focuses loss on top-K stocks per month (recommended).
-            "mean" samples pairs uniformly across all stocks in the month.
-        lambdarank_num_pair_per_sample: When pair_method="topk", this is the cutoff K
-            (e.g. 10 means optimize NDCG@10 — get the top 10 stocks right each month).
-            When pair_method="mean", it is the number of pairs sampled per stock.
-        ndcg_exp_gain: Set False when y is continuous returns. Set True only for
-            integer relevance grades (web-search style, grades must be <= 31).
-        lambdarank_normalization: Normalizes leaf values by lambda gradient. Disable
-            if training stagnates.
-        lambdarank_score_normalization: Normalizes gradient by score difference between
-            pairs. Acts as regularization. Disable if training won't converge.
-    """
-
-    def __init__(
-        self,
-        num_rounds: int = 100,
-        objective: str = "rank:ndcg",
-        learning_rate: float = 0.1,
-        max_depth: int = 6,
-        subsample: float = 0.8,
-        colsample_bytree: float = 0.8,
-        random_state: int = 42,
-        verbosity: int = 0,
-        # --- LTR-specific ---
-        ndcg_exp_gain: bool = False,
-        lambdarank_pair_method: str = "topk",
-        lambdarank_num_pair_per_sample: int = 10,
-        lambdarank_normalization: bool = True,
-        lambdarank_score_normalization: bool = True,
-        lambdarank_unbiased: bool = False,
-        lambdarank_bias_norm: float = 2.0,
-    ):
-        super().__init__(
-            num_rounds=num_rounds,
-            learning_rate=learning_rate,
-            max_depth=max_depth,
-            subsample=subsample,
-            colsample_bytree=colsample_bytree,
-            random_state=random_state,
-            verbosity=verbosity,
-        )
-        self.objective = objective
-        self.ndcg_exp_gain = ndcg_exp_gain
-        self.lambdarank_pair_method = lambdarank_pair_method
-        self.lambdarank_num_pair_per_sample = lambdarank_num_pair_per_sample
-        self.lambdarank_normalization = lambdarank_normalization
-        self.lambdarank_score_normalization = lambdarank_score_normalization
-        self.lambdarank_unbiased = lambdarank_unbiased
-        self.lambdarank_bias_norm = lambdarank_bias_norm
-
-    def _xgb_params(self) -> dict:
-        return {
-            "objective": self.objective,
-            "learning_rate": self.learning_rate,
-            "max_depth": self.max_depth,
-            "subsample": self.subsample,
-            "colsample_bytree": self.colsample_bytree,
-            "seed": self.random_state,
-            "verbosity": self.verbosity,
-            "ndcg_exp_gain": self.ndcg_exp_gain,
-            "lambdarank_pair_method": self.lambdarank_pair_method,
-            "lambdarank_num_pair_per_sample": self.lambdarank_num_pair_per_sample,
-            "lambdarank_normalization": self.lambdarank_normalization,
-            "lambdarank_score_normalization": self.lambdarank_score_normalization,
-            "lambdarank_unbiased": self.lambdarank_unbiased,
-            "lambdarank_bias_norm": self.lambdarank_bias_norm,
-        }
-
-    def fit(
-        self,
-        X: pd.DataFrame | np.ndarray,
-        y: pd.Series | np.ndarray,
-        # groups: one integer per month = number of stocks in that month.
-        # Ranking loss is computed within each group; sum(groups) must equal len(X).
-        groups: list[int] | np.ndarray,
-        eval_set: Optional[tuple] = None,
-        eval_groups: Optional[list[int]] = None,
-        verbose: bool = False,
-    ) -> XGBoostRanker:
-        feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
-        X_arr = X.values if isinstance(X, pd.DataFrame) else X
-        y_arr = y.values if isinstance(y, pd.Series) else y
-
-        dtrain = xgb.DMatrix(X_arr, label=y_arr, feature_names=feature_names)
-        dtrain.set_group(groups)
-
-        evals = []
-        if eval_set is not None and eval_groups is not None:
-            X_e, y_e = eval_set
-            X_e = X_e.values if isinstance(X_e, pd.DataFrame) else X_e
-            y_e = y_e.values if isinstance(y_e, pd.Series) else y_e
-            deval = xgb.DMatrix(X_e, label=y_e, feature_names=feature_names)
-            deval.set_group(eval_groups)
-            evals = [(dtrain, "train"), (deval, "eval")]
-
-        evals_result: Dict[str, Dict[str, list[float]]] = {}
-        self.model_ = xgb.train(
-            self._xgb_params(),
-            dtrain,
-            num_boost_round=self.num_rounds,
-            evals=evals,
-            evals_result=evals_result,
-            verbose_eval=verbose,
-        )
-        self.feature_names_ = feature_names
-        self.training_history_ = evals_result
-        return self
-
-    def predict(
-        self,
-        X: pd.DataFrame | np.ndarray,
-        iteration_range: Optional[tuple[int, int]] = None,
-    ) -> np.ndarray:
-        if not self.is_fitted:
-            raise ValueError("Call fit() first.")
-        X_arr = X.values if isinstance(X, pd.DataFrame) else X
-        dtest = xgb.DMatrix(X_arr, feature_names=getattr(self, "feature_names_", None))
-        kwargs = {"iteration_range": iteration_range} if iteration_range else {}
-        return self.model_.predict(dtest, **kwargs)
-
-    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]:
-        if not self.is_fitted:
-            raise ValueError("Call fit() first.")
-        return self.model_.get_score(importance_type=importance_type)
-
-    def save_model(self, filepath: str) -> None:
-        if not self.is_fitted:
-            raise ValueError("Call fit() first.")
-        self.model_.save_model(filepath)
-
-    def load_model(self, filepath: str) -> XGBoostRanker:
-        self.model_ = xgb.Booster()
-        self.model_.load_model(filepath)
         return self
 
 
@@ -253,69 +39,19 @@ class XGBoostRanker(BaseRankingModel):
 # ---------------------------------------------------------------------------
 
 def encode_labels_quintile(y: pd.Series, groups: list[int]) -> np.ndarray:
-    """
-    Encode continuous returns into quintile grades {0, 1, 2, 3, 4} computed
-    independently within each month (group).
-
-    Grade 4 = top 20% of returns that month, grade 0 = bottom 20%.
-    Ties are handled by assigning the lower grade (duplicates='drop' falls back
-    to fewer bins when a month has too few unique values).
-
-    Args:
-        y: Flat Series of continuous returns, same row order as X.
-        groups: Stock counts per month; sum(groups) must equal len(y).
-
-    Returns:
-        Integer ndarray of grades, same length as y.
-    """
-    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
-    out = np.empty(len(y_arr), dtype=np.int64)
-    cursor = 0
-    for g in groups:
-        sl = slice(cursor, cursor + g)
-        chunk = pd.Series(y_arr[sl])
-        out[sl] = pd.qcut(chunk, q=5, labels=False, duplicates="drop").astype(np.int64)
-        cursor += g
     return out
 
 
 def encode_labels_decile(y: pd.Series, groups: list[int]) -> np.ndarray:
-    """
-    Same as encode_labels_quintile but uses 10 bins (deciles).
-    Grade 9 = top 10%, grade 0 = bottom 10%.
-    """
-    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
-    out = np.empty(len(y_arr), dtype=np.int64)
-    cursor = 0
-    for g in groups:
-        sl = slice(cursor, cursor + g)
-        chunk = pd.Series(y_arr[sl])
-        out[sl] = pd.qcut(chunk, q=10, labels=False, duplicates="drop").astype(np.int64)
-        cursor += g
     return out
 
 
 def encode_labels_binary(y: pd.Series, groups: list[int]) -> np.ndarray:
-    """
-    Binary encoding: 1 if return >= median of the month, 0 otherwise.
-    Useful for simple top-half vs bottom-half ranking.
-    """
-    y_arr = y.values if isinstance(y, pd.Series) else np.asarray(y)
-    out = np.empty(len(y_arr), dtype=np.int64)
-    cursor = 0
-    for g in groups:
-        sl = slice(cursor, cursor + g)
-        chunk = y_arr[sl]
-        out[sl] = (chunk >= np.median(chunk)).astype(np.int64)
-        cursor += g
     return out
 
 
 # Registry so callers can select an encoder by name from config
 _LABEL_ENCODERS = {
-    "quintile": encode_labels_quintile,
-    "decile": encode_labels_decile,
-    "binary": encode_labels_binary,
 }
 
 

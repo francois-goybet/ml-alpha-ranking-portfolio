@@ -17,6 +17,7 @@ ml-alpha-ranking-portfolio/
 # Generated data and artifacts
 # -----------------------------------------------------------------------------
 data/
+!src/data/
 generated/
 wandb/
 
