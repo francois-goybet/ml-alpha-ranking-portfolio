@@ -21,12 +21,12 @@ except ImportError:
 # basically you have to provide the model the indices corresponding to the same month so it knows what
 # group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
-class BaseRankingModel(ABC):
-        return self
+# class BaseRankingModel(ABC):
+#         return self
 
 
-class XGBoostRanker(BaseRankingModel):
-        return self
+# class XGBoostRanker(BaseRankingModel):
+#         return self
 
 
 # ---------------------------------------------------------------------------
