@@ -21,6 +21,8 @@ except ImportError:
 # basically you have to provide the model the indices corresponding to the same month so it knows what
 # group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
+_META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}        
+
 class BaseRankingModel(ABC):
     """Shared interface and hyper-parameter store for all rankers."""
 
@@ -121,8 +123,6 @@ class XGBoostRanker(BaseRankingModel):
         y: pd.Series | np.ndarray,
         groups: list[int] | np.ndarray,
     ) -> xgb.DMatrix:
-        print(groups)
-        print(len(groups))
         """Build an XGBoost DMatrix with per-row query group ids."""
         X_arr = X.values if isinstance(X, pd.DataFrame) else X
         y_arr = y.values if isinstance(y, pd.Series) else y
@@ -145,7 +145,6 @@ class XGBoostRanker(BaseRankingModel):
     ) -> XGBoostRanker:
         feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
         y_s = y if isinstance(y, pd.Series) else pd.Series(y)
-
         # Encode continuous returns to integer grades if needed
         if self.label_encoder is not None:
             if callable(self.label_encoder) and not isinstance(self.label_encoder, str):
@@ -175,7 +174,6 @@ class XGBoostRanker(BaseRankingModel):
             evals.append((deval, "eval"))
 
         evals_result: dict = {}
-        print(self._xgb_params())
         self.model_ = xgb.train(
             self._xgb_params(),
             dtrain,
@@ -269,7 +267,6 @@ def encode_labels_argsort(y: pd.Series, groups: list[int]) -> np.ndarray:
     Assign per-group ranks using argsort.
     0 = worst, higher = better.
     """
-    print(y, groups)
     out = np.empty(len(y), dtype=np.int64)
     cursor = 0
 
@@ -525,12 +522,13 @@ class MultiHorizonRanker:
         if missing:
             raise ValueError(f"Target columns not found in Y: {missing}")
 
+        feature_cols = [c for c in X.columns if c not in _META]
         self.models_: Dict[str, BaseRankingModel] = {}
         for target in self.targets:
             model = self._make_model()
-            es = (eval_set[0], eval_set[1][target]) if eval_set is not None else None
+            es = (eval_set[0][feature_cols], eval_set[1][target]) if eval_set is not None else None
             model.fit(
-                X,
+                X[feature_cols],
                 Y[target],
                 groups=groups,
                 eval_set=es,
@@ -547,7 +545,8 @@ class MultiHorizonRanker:
         """Returns a dict {target: score_array} for each horizon."""
         if not self.is_fitted:
             raise ValueError("Call fit() first.")
-        return {target: model.predict(X) for target, model in self.models_.items()}
+        feature_cols = [c for c in X.columns if c not in _META]
+        return {target: model.predict(X[feature_cols]) for target, model in self.models_.items()}
 
     def get_feature_importance(
         self, importance_type: str = "gain"

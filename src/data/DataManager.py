@@ -210,7 +210,7 @@ class DataManager:
 
         targets_list = [targets] if isinstance(targets, str) else list(targets)
         df = df.dropna(subset=targets_list).reset_index(drop=True)
-        X = df[feature_cols]
+        X = df.copy()
         y = df[targets]
         groups = df.groupby("yyyymm").size().tolist()
         return X, y, groups
