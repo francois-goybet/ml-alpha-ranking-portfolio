@@ -187,6 +187,12 @@ class DataManager:
                 "dataset.parquet not found. Call get_data() first."
             )
 
+        # Add 6 lagged monthly return features computed on the full dataset
+        # (before date filtering) so lags at the start of each split are correct.
+        df = df.sort_values(["permno", "yyyymm"])
+        for lag in range(1, 7):
+            df[f"ret_lag{lag}"] = df.groupby("permno")["ret"].shift(lag)
+
         start_date = start or self.data_config.get(f"{split}_start")
         end_date = end or self.data_config.get(f"{split}_end")
 

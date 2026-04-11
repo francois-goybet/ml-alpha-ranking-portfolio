@@ -33,6 +33,7 @@ class BaseRankingModel(ABC):
         colsample_bytree: float = 0.8,
         random_state: int = 42,
         verbosity: int = 0,
+        eval_at: list[int] | None = None,
     ) -> None:
         self.num_rounds = num_rounds
         self.learning_rate = learning_rate
@@ -41,6 +42,7 @@ class BaseRankingModel(ABC):
         self.colsample_bytree = colsample_bytree
         self.random_state = random_state
         self.verbosity = verbosity
+        self.eval_at = eval_at if eval_at is not None else [10, 20]
 
     @property
     def is_fitted(self) -> bool:
@@ -81,6 +83,7 @@ class XGBoostRanker(BaseRankingModel):
         random_state: int = 42,
         verbosity: int = 0,
         ndcg_exp_gain: bool = False,
+        eval_at: list[int] | None = None,
         # label_encoder: convert continuous returns to integer grades per month.
         # Built-in options: "quintile", "decile", "binary", "argsort" (default).
         # Pass a callable f(y, groups) -> np.ndarray for a custom scheme.
@@ -95,6 +98,7 @@ class XGBoostRanker(BaseRankingModel):
             colsample_bytree=colsample_bytree,
             random_state=random_state,
             verbosity=verbosity,
+            eval_at=eval_at,
         )
         self.objective = objective
         self.ndcg_exp_gain = ndcg_exp_gain
@@ -109,7 +113,7 @@ class XGBoostRanker(BaseRankingModel):
             "colsample_bytree": self.colsample_bytree,
             "seed": self.random_state,
             "verbosity": self.verbosity,
-            "eval_metric": ["ndcg@10", "ndcg@20", "auc"],
+            "eval_metric": [f"ndcg@{k}" for k in self.eval_at] + ["auc"],
             "ndcg_exp_gain": self.ndcg_exp_gain,
         }
         params["ndcg_exp_gain"] = self.ndcg_exp_gain
@@ -308,6 +312,7 @@ class LGBMRanker(BaseRankingModel):
         colsample_bytree: float = 0.8,
         random_state: int = 42,
         verbosity: int = -1,
+        eval_at: list[int] | None = None,
         # --- LTR-specific ---
         lambdarank_truncation_level: int = 10,
         label_gain: Optional[list[float]] = None,
@@ -325,6 +330,7 @@ class LGBMRanker(BaseRankingModel):
             colsample_bytree=colsample_bytree,
             random_state=random_state,
             verbosity=verbosity,
+            eval_at=eval_at,
         )
         self.objective = objective
         self.num_leaves = num_leaves
@@ -345,6 +351,7 @@ class LGBMRanker(BaseRankingModel):
             "seed": self.random_state,
             "verbosity": self.verbosity,
             "lambdarank_truncation_level": self.lambdarank_truncation_level,
+            "eval_at": self.eval_at,
         }
         if self.label_gain is not None:
             params["label_gain"] = self.label_gain
@@ -400,14 +407,25 @@ class LGBMRanker(BaseRankingModel):
         if eval_set is not None and eval_groups is not None:
             X_e, y_e = eval_set
             X_e = X_e.values if isinstance(X_e, pd.DataFrame) else X_e
-            y_e = y_e.values if isinstance(y_e, pd.Series) else y_e
-            deval = lgb.Dataset(X_e, label=y_e, group=eval_groups, reference=dtrain)
+            y_e_s = y_e if isinstance(y_e, pd.Series) else pd.Series(y_e)
+            if self.label_encoder is not None:
+                y_e_arr = encoder_fn(y_e_s, list(eval_groups))
+            else:
+                y_e_arr = y_e_s.to_numpy(dtype=np.float32, na_value=0)
+            deval = lgb.Dataset(X_e, label=y_e_arr, group=eval_groups, reference=dtrain)
             valid_sets.append(deval)
             valid_names.append("eval")
 
         evals_result: dict = {}
         callbacks = [lgb.record_evaluation(evals_result)]
-        if not verbose:
+        if verbose:
+            def _fmt_callback(env):
+                row_parts = [f"[{env.iteration}]"]
+                for ds_name, metric, value, _ in sorted(env.evaluation_result_list, key=lambda x: (x[0], x[1])):
+                    row_parts.append(f"{ds_name} {metric}: {value:.4f}")
+                print("  ".join(row_parts))
+            callbacks.append(_fmt_callback)
+        else:
             callbacks.append(lgb.log_evaluation(period=-1))
 
         self.model_ = lgb.train(
