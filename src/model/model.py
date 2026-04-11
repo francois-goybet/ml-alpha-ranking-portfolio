@@ -21,6 +21,57 @@ except ImportError:
 # basically you have to provide the model the indices corresponding to the same month so it knows what
 # group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
+# ---------------------------------------------------------------------------
+# Custom eval: Rank Precision (top-decile intersection rate) — matches paper definition.
+# For each group (month), K = group_size // 10 (top 10% of stocks).
+# Rank Precision = |predicted top-decile ∩ actual top-decile| / K
+# Random baseline = 10%; good models reach 15–30% (consistent with paper Table 5).
+# ---------------------------------------------------------------------------
+
+def _rank_precision_xgb(groups_list: list[list[int]]):
+    """XGBoost custom eval: rank precision at top decile.
+    groups_list[i] contains group sizes for the i-th eval dataset.
+    XGBoost calls feval once per dataset in order (train, eval, ...).
+    """
+    call_count = [0]
+
+    def eval_fn(preds: np.ndarray, dmat: "xgb.DMatrix"):
+        grps = groups_list[call_count[0] % len(groups_list)]
+        call_count[0] += 1
+        labels = dmat.get_label()
+        precisions = []
+        cursor = 0
+        for g in grps:
+            g = int(g)
+            sl = slice(cursor, cursor + g)
+            top_k = max(1, g // 10)
+            pred_top = set(np.argsort(preds[sl])[::-1][:top_k])
+            label_top = set(np.argsort(labels[sl])[::-1][:top_k])
+            precisions.append(len(pred_top & label_top) / top_k)
+            cursor += g
+        return "rank_prec@decile", float(np.mean(precisions))
+    return eval_fn
+
+
+def _rank_precision_lgb():
+    """LightGBM custom eval: rank precision at top decile."""
+    def eval_fn(preds: np.ndarray, dataset: "lgb.Dataset"):
+        labels = dataset.get_label()
+        groups = dataset.get_group()
+        precisions = []
+        cursor = 0
+        for g in groups:
+            g = int(g)
+            sl = slice(cursor, cursor + g)
+            top_k = max(1, g // 10)
+            pred_top = set(np.argsort(preds[sl])[::-1][:top_k])
+            label_top = set(np.argsort(labels[sl])[::-1][:top_k])
+            precisions.append(len(pred_top & label_top) / top_k)
+            cursor += g
+        return "rank_prec@decile", float(np.mean(precisions)), True
+    return eval_fn
+
+
 class BaseRankingModel(ABC):
     """Shared interface and hyper-parameter store for all rankers."""
 
@@ -125,8 +176,6 @@ class XGBoostRanker(BaseRankingModel):
         y: pd.Series | np.ndarray,
         groups: list[int] | np.ndarray,
     ) -> xgb.DMatrix:
-        print(groups)
-        print(len(groups))
         """Build an XGBoost DMatrix with per-row query group ids."""
         X_arr = X.values if isinstance(X, pd.DataFrame) else X
         y_arr = y.values if isinstance(y, pd.Series) else y
@@ -146,7 +195,7 @@ class XGBoostRanker(BaseRankingModel):
         eval_set: Optional[tuple] = None,
         eval_groups: Optional[list[int]] = None,
         verbose: bool = False,
-    ) -> XGBoostRanker:
+    ) -> "XGBoostRanker":
         feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
         y_s = y if isinstance(y, pd.Series) else pd.Series(y)
 
@@ -178,13 +227,17 @@ class XGBoostRanker(BaseRankingModel):
             deval = self._build_dmatrix(X_e, y_e_encoded, eval_groups)
             evals.append((deval, "eval"))
 
+        groups_list = [list(groups)]
+        if eval_set is not None and eval_groups is not None:
+            groups_list.append(list(eval_groups))
+
         evals_result: dict = {}
-        print(self._xgb_params())
         self.model_ = xgb.train(
             self._xgb_params(),
             dtrain,
             num_boost_round=self.num_rounds,
             evals=evals,
+            custom_metric=_rank_precision_xgb(groups_list),
             evals_result=evals_result,
             verbose_eval=verbose,
         )
@@ -273,7 +326,6 @@ def encode_labels_argsort(y: pd.Series, groups: list[int]) -> np.ndarray:
     Assign per-group ranks using argsort.
     0 = worst, higher = better.
     """
-    print(y, groups)
     out = np.empty(len(y), dtype=np.int64)
     cursor = 0
 
@@ -289,12 +341,42 @@ def encode_labels_argsort(y: pd.Series, groups: list[int]) -> np.ndarray:
 
     return out
 
+
+def encode_labels_long_ranker(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """Dual-Ranker long-leg labeling: top-decile NDCG emphasis.
+
+    For each month:
+      - top_k = max(1, group_size // 10)   (top 10%)
+      - Best stock → label top_k, second best → top_k-1, ..., top_k-th → 1
+      - All remaining stocks → label 0
+
+    This creates a sparse relevance vector that focuses NDCG loss entirely on
+    the top decile while zeroing out mid-ranked noise.
+
+    Note for LightGBM (lambdarank): set ``label_gain`` in the model config to
+    cover values 0..top_k, e.g. ``list(range(max_group // 10 + 1))``, otherwise
+    LightGBM clips gains at label 4 by default.
+    """
+    out = np.zeros(len(y), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        top_k = max(1, g // 10)
+        y_group = y.iloc[cursor : cursor + g].to_numpy()
+        # indices sorted highest return first
+        sorted_idx = np.argsort(y_group)[::-1]
+        for rank, idx in enumerate(sorted_idx[:top_k]):
+            out[cursor + idx] = top_k - rank  # top_k, top_k-1, ..., 1
+        cursor += g
+    return out
+
+
 # Registry so callers can select an encoder by name from config
 _LABEL_ENCODERS = {
-    "quintile": encode_labels_quintile,
-    "decile":   encode_labels_decile,
-    "binary":   encode_labels_binary,
-    "argsort":  encode_labels_argsort,
+    "quintile":     encode_labels_quintile,
+    "decile":       encode_labels_decile,
+    "binary":       encode_labels_binary,
+    "argsort":      encode_labels_argsort,
+    "long_ranker":  encode_labels_long_ranker,
 }
 
 
@@ -434,6 +516,7 @@ class LGBMRanker(BaseRankingModel):
             num_boost_round=self.num_rounds,
             valid_sets=valid_sets,
             valid_names=valid_names,
+            feval=_rank_precision_lgb(),
             callbacks=callbacks,
         )
         self.feature_names_ = feature_names

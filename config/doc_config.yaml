@@ -13,6 +13,10 @@ data:
   test_start: 2021-01-01           # str — start date of test period
   test_end: 2024-12-31             # str — end date of test period
   market_cap: 10                   # int/float — minimum market cap filter (in $B or units used by DataManager)
+  return_lags: [1, 2, 3, 6, 12]    # list[int] — which lagged monthly returns to include as features
+                                   #   e.g. [1, 2, 3, 6, 12] adds ret_lag1, ret_lag2, ..., ret_lag12
+                                   #   [] or omit to include no lag features
+                                   #   default: [1, 2, 3, 4, 5, 6]
 
 model:
   # --- MultiHorizonRanker ---
@@ -76,3 +80,28 @@ model:
 pipeline:
   plots_dir: generated/plots       # str  — output directory for generated plots
   rebuild_dataset: false           # bool — force recomputation of features even if cached data exists
+
+feature_pipeline:
+  cross_sectional_rank: false      # bool — rank-normalise each feature within each month to [0, 1]
+                                   #         applied before global scaling; removes outlier effects
+  winsorize: null                  # float | null — clip each feature at [q, 1-q] quantile per month
+                                   #   e.g. 0.01 = clip at 1st and 99th percentile
+                                   #   null = no winsorisation
+  impute: median                   # str | null — NaN imputation strategy
+                                   #   "median" — fill with per-feature train median (recommended)
+                                   #   "zero"   — fill with 0
+                                   #   null     — no imputation (XGBoost handles NaNs natively)
+  scale: null                      # str | null — global feature scaling applied after CS transforms
+                                   #   "standard" — zero mean, unit variance (z-score)
+                                   #   "minmax"   — scale to [0, 1]
+                                   #   null       — no scaling (recommended if cross_sectional_rank: true)
+  drop_low_variance: 0.0           # float | null — drop features with variance <= threshold
+                                   #   0.0 = drop only constants
+                                   #   null = keep all features
+  pca: null                        # int | null — keep top-N PCA components after all other transforms
+                                   #   null = no PCA
+  centroid_feature: false          # bool — add L2 distance to the cross-sectional centroid per month
+                                   #   captures how "extreme" a stock's characteristics are relative to peers
+  ridge_features:                  # fit Ridge regression on train labels and add predictions as meta-features
+    targets: [ret_1m, ret_3m, ret_6m]  # list[str] — one Ridge model fitted per target horizon
+    alpha: 1.0                     # float — Ridge regularisation strength (higher = more shrinkage)

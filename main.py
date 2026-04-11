@@ -6,6 +6,7 @@ from sklearn.metrics import roc_auc_score
 from src.config.config_loader import load_config
 
 from src.data.DataManager import DataManager
+from src.data.feature_pipeline import FeaturePipeline
 from src.model.model import MultiHorizonRanker, HorizonEnsemble, _LABEL_ENCODERS
 
 def main(args):
@@ -39,9 +40,27 @@ def main(args):
         print("Warning: NaN values found in y_train. This may cause issues during training.")
         print(y_train.isna().sum())
 
-    targets = config.get("model", {}).get("targets", ["ret_1m", "ret_3m", "ret_6m"])
-    model = MultiHorizonRanker(targets=targets, **config.get("model", {}))
-    model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=True)
+    # --- Feature pipeline ---
+    fp_cfg = config.get("feature_pipeline", {})
+    feat_pipeline = FeaturePipeline(fp_cfg)
+    print("\n--- Feature pipeline ---")
+    print(f"  Steps: cs_rank={fp_cfg.get('cross_sectional_rank', False)}  "
+          f"winsorize={fp_cfg.get('winsorize', None)}  "
+          f"impute={fp_cfg.get('impute', None)}  "
+          f"scale={fp_cfg.get('scale', None)}  "
+          f"pca={fp_cfg.get('pca', None)}  "
+          f"centroid={fp_cfg.get('centroid_feature', False)}  "
+          f"ridge={list(fp_cfg['ridge_features']['targets']) if fp_cfg.get('ridge_features') else None}")
+    X_train = feat_pipeline.fit_transform(X_train, groups=group_train, y=y_train)
+    X_val   = feat_pipeline.transform(X_val)
+    X_test  = feat_pipeline.transform(X_test)
+    print(f"  Output shape: train={X_train.shape}  val={X_val.shape}  test={X_test.shape}")
+
+    model_cfg = config.get("model", {})
+    targets = model_cfg.get("targets", ["ret_1m", "ret_3m", "ret_6m"])
+    verbose = config.get("pipeline", {}).get("verbose", True)
+    model = MultiHorizonRanker(**model_cfg)
+    model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
 
     # --- Post-training evaluation on test set ---
     label_encoder_name = config.get("model", {}).get("label_encoder", "argsort")
@@ -112,7 +131,7 @@ def main(args):
         auc_ens = roc_auc_score((ref_encoded > np.median(ref_encoded)).astype(int), ensemble_scores)
         ndcg_parts_ens = "  ".join(f"NDCG@{k}: {np.mean(ndcg_scores_ens[k]):.4f}" for k in eval_at)
         hit_parts_ens = "  ".join(f"Hit@{k}: {np.mean(hit_scores_ens[k]):.4f}" for k in eval_at)
-        w_str = str(weights) if weights else "equal"
+        w_str = str(weights) if weights is not None else "equal"
         print(f"  [ensemble/{combination} w={w_str}]  {ndcg_parts_ens}  {hit_parts_ens}  AUC: {auc_ens:.4f}")
 
 
