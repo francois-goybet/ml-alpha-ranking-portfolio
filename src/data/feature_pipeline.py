@@ -69,6 +69,27 @@ class FeaturePipeline:
     # Public API
     # ------------------------------------------------------------------
 
+    def total_preprocessing_steps(
+            self,
+            X_train: pd.DataFrame,
+            group_train: list[int],
+            y_train: pd.DataFrame,
+            X_val: pd.DataFrame,
+            X_test: pd.DataFrame,    
+            ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        print("\n--- Feature pipeline ---")
+        print(f"  Steps: cs_rank={self.cfg.get('cross_sectional_rank', False)}  "
+            f"winsorize={self.cfg.get('winsorize', None)}  "
+            f"impute={self.cfg.get('impute', None)}  "
+            f"scale={self.cfg.get('scale', None)}  "
+            f"pca={self.cfg.get('pca', None)}  "
+            f"centroid={self.cfg.get('centroid_feature', False)}  "
+            f"ridge={list(self.cfg['ridge_features']['targets']) if self.cfg.get('ridge_features') else None}")
+        X_train = self.fit_transform(X_train, groups=group_train, y=y_train)
+        X_val   = self.transform(X_val)
+        X_test  = self.transform(X_test)
+        print(f"  Output shape: train={X_train.shape}  val={X_val.shape}  test={X_test.shape}")
+        return X_train, X_val, X_test
     def fit_transform(
         self,
         X: pd.DataFrame,
