@@ -187,6 +187,13 @@ class DataManager:
                 "dataset.parquet not found. Call get_data() first."
             )
 
+        # Add lagged monthly return features computed on the full dataset
+        # (before date filtering) so lags at the start of each split are correct.
+        return_lags = self.data_config.get("return_lags", list(range(1, 7)))
+        df = df.sort_values(["permno", "yyyymm"])
+        for lag in return_lags:
+            df[f"ret_lag{lag}"] = df.groupby("permno")["ret"].shift(lag)
+
         start_date = start or self.data_config.get(f"{split}_start")
         end_date = end or self.data_config.get(f"{split}_end")
 
@@ -226,6 +233,9 @@ class DataManager:
           - replace ±inf with NaN
         """
         X = X.replace([np.inf, -np.inf], np.nan)
+        # Convert any pandas nullable / extension dtypes to plain numpy float64
+        # so XGBoost/LightGBM can consume the array without TypeError on pd.NA.
+        X = X.apply(lambda col: col.astype("float64") if not col.dtype == np.float64 else col)
         return X
 
     def _load_crsp(self, start: str, end: str, market_cap: float) -> pd.DataFrame:

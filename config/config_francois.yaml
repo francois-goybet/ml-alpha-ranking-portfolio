@@ -3,23 +3,57 @@ data:
   data_path: data/raw.csv
   train_start: 1990-01-01
   train_end: 2015-12-31
-  val_start: 2016-01-01
+  val_start: 2016-03-01
   val_end: 2020-12-31
-  test_start: 2021-01-01
+  test_start: 2021-03-01
   test_end: 2024-12-31
   market_cap: 10
+  return_lags: [1, 2, 3, 6]  # lagged monthly return features to add as predictors
 
 model:
+  backend: xgboost
+  targets: [ret_1m, ret_3m, ret_6m]
+  label_encoder: long_ranker
   objective: rank:ndcg
   num_rounds: 100
   learning_rate: 0.1
   max_depth: 5
-  subsample: 0.8
-  colsample_bytree: 0.8
-  random_state: 42
-  ndcg_exp_gain: false
-  label_encoder: "quintile"
+  subsample: 0.6
+  colsample_bytree: 0.6
+  random_state: 1234
+  eval_at: [10, 20, 30]
+  verbosity: 0
+
 
 pipeline:
   plots_dir: generated/plots
   rebuild_dataset: false
+  verbose: false          # show boosting round logs during training
+
+feature_pipeline:
+  cross_sectional_rank: True   # rank-normalise each feature within each month to [0, 1]
+  winsorize: null        # clip at 1st/99th percentile per month
+  impute: median               # fill NaNs with per-feature train median
+  scale: null                 # no global scaling (CS rank already normalises)
+  drop_low_variance: 0.0       # drop constant features
+  pca: null                    # no PCA
+  centroid_feature: False       # add L2 distance to monthly centroid as a feature
+  ridge_features:
+    targets: [ret_1m, ret_3m, ret_6m]
+    alpha: 10000000000000          # Ridge regularisation strength
+  autoencoder:
+    hidden_dims: [32, 16, 8]
+    variational: true
+    beta: 1.0          # or e.g. 4.0 for beta-VAE
+    epochs: 50
+    batch_size: 512
+    lr: 1e-3
+    weight_decay: 1e-5
+    dropout: 0.1
+    replace_features: False      # true → keep only latent cols; false → append
+    device: "mps"                # "mps" for Apple Silicon
+
+ensemble:
+  enabled: true
+  combination: mean_rank   # "mean_rank" (Borda count) or "mean_score"
+  weights: [0.6, 0.2, 0.2] # ret_1m, ret_3m, ret_6m — null for equal weights
