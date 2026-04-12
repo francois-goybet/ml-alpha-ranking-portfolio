@@ -76,32 +76,58 @@ class FeaturePipeline:
         y: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """Fit on X (and optionally y for Ridge features) and return transformed copy."""
+        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+
         X = X.copy()
-        X = self._apply_cs_transforms(X, groups, fit=True)
-        X = self._add_centroid_feature(X, groups)
-        X = self._drop_low_variance(X, fit=True)
-        X = self._impute(X, fit=True)
-        X = self._scale(X, fit=True)
-        X = self._fit_ridge(X, y)
-        X = self._fit_autoencoder(X)
-        X = self._apply_pca(X, fit=True)
+
+        meta = X[list(_META & set(X.columns))].copy()
+        features = X.drop(columns=list(_META & set(X.columns)))
+
+        # --- apply transformations ONLY on features ---
+        features = self._apply_cs_transforms(features, groups, fit=True)
+        features = self._add_centroid_feature(features, groups)
+        features = self._drop_low_variance(features, fit=True)
+        features = self._impute(features, fit=True)
+        features = self._scale(features, fit=True)
+        features = self._fit_ridge(features, y)
+        # features = self._fit_autoencoder(features)
+        features = self._apply_pca(features, fit=True)
+
         self._fitted = True
-        return X
+
+        # --- recombine ---
+        return pd.concat([meta.reset_index(drop=True),
+                        features.reset_index(drop=True)], axis=1)
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply previously fitted transforms to val/test."""
         if not self._fitted:
             raise RuntimeError("Call fit_transform() on the train set first.")
+
+        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+
         X = X.copy()
-        X = self._apply_cs_transforms(X, groups=None, fit=False)
-        X = self._add_centroid_feature(X, groups=None)
-        X = self._select_cols(X)
-        X = self._impute(X, fit=False)
-        X = self._scale(X, fit=False)
-        X = self._apply_ridge(X)
-        X = self._apply_autoencoder(X)
-        X = self._apply_pca(X, fit=False)
-        return X
+
+        meta = X[list(_META & set(X.columns))].copy()
+        features = X.drop(columns=list(_META & set(X.columns)))
+
+        # --- apply ONLY feature transforms ---
+        features = self._apply_cs_transforms(features, groups=None, fit=False)
+        features = self._add_centroid_feature(features, groups=None)
+        features = self._select_cols(features)
+
+        features = self._impute(features, fit=False)
+        features = self._scale(features, fit=False)
+        features = self._apply_ridge(features)
+        # features = self._apply_autoencoder(features)
+        features = self._apply_pca(features, fit=False)
+
+        # --- recombine ---
+        return pd.concat(
+            [meta.reset_index(drop=True),
+            features.reset_index(drop=True)],
+            axis=1
+        )
 
     # ------------------------------------------------------------------
     # Transform steps

@@ -28,6 +28,8 @@ except ImportError:
 # Random baseline = 10%; good models reach 15–30% (consistent with paper Table 5).
 # ---------------------------------------------------------------------------
 
+_META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+
 def _rank_precision_xgb(groups_list: list[list[int]]):
     """XGBoost custom eval: rank precision at top decile.
     groups_list[i] contains group sizes for the i-th eval dataset.
@@ -167,7 +169,6 @@ class XGBoostRanker(BaseRankingModel):
             "eval_metric": [f"ndcg@{k}" for k in self.eval_at] + ["auc"],
             "ndcg_exp_gain": self.ndcg_exp_gain,
         }
-        params["ndcg_exp_gain"] = self.ndcg_exp_gain
         return params
 
     @staticmethod
@@ -199,6 +200,7 @@ class XGBoostRanker(BaseRankingModel):
         feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
         y_s = y if isinstance(y, pd.Series) else pd.Series(y)
 
+  
         # Encode continuous returns to integer grades if needed
         if self.label_encoder is not None:
             if callable(self.label_encoder) and not isinstance(self.label_encoder, str):
@@ -626,12 +628,14 @@ class MultiHorizonRanker:
         if missing:
             raise ValueError(f"Target columns not found in Y: {missing}")
 
+        feature_cols = [c for c in X.columns if c not in _META]
+
         self.models_: Dict[str, BaseRankingModel] = {}
         for target in self.targets:
             model = self._make_model()
-            es = (eval_set[0], eval_set[1][target]) if eval_set is not None else None
+            es = (eval_set[0][feature_cols], eval_set[1][target]) if eval_set is not None else None
             model.fit(
-                X,
+                X[feature_cols],
                 Y[target],
                 groups=groups,
                 eval_set=es,
@@ -648,7 +652,8 @@ class MultiHorizonRanker:
         """Returns a dict {target: score_array} for each horizon."""
         if not self.is_fitted:
             raise ValueError("Call fit() first.")
-        return {target: model.predict(X) for target, model in self.models_.items()}
+        feature_cols = [c for c in X.columns if c not in _META]
+        return {target: model.predict(X[feature_cols]) for target, model in self.models_.items()}
 
     def get_feature_importance(
         self, importance_type: str = "gain"
@@ -661,6 +666,11 @@ class MultiHorizonRanker:
             for target, model in self.models_.items()
         }
 
+    def get_history(self) -> Dict[str, dict]:
+        """Returns training history (eval metrics per iteration) for each horizon."""
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        return {target: model.training_history_ for target, model in self.models_.items()}
 
 # ---------------------------------------------------------------------------
 # Horizon ensemble — combines scores across horizons

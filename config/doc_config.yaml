@@ -13,7 +13,7 @@ data:
   test_start: 2021-01-01           # str — start date of test period
   test_end: 2024-12-31             # str — end date of test period
   market_cap: 10                   # int/float — minimum market cap filter (in $B or units used by DataManager)
-  return_lags: [1, 2, 3, 6, 12]    # list[int] — which lagged monthly returns to include as features
+  return_lags: []    # list[int] — which lagged monthly returns to include as features
                                    #   e.g. [1, 2, 3, 6, 12] adds ret_lag1, ret_lag2, ..., ret_lag12
                                    #   [] or omit to include no lag features
                                    #   default: [1, 2, 3, 4, 5, 6]
