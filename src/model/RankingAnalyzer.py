@@ -4,6 +4,7 @@ import pandas as pd
 from scipy import stats
 from src.model.model import MultiHorizonRanker, HorizonEnsemble
 from sklearn.metrics import roc_auc_score
+import statsmodels.api as sm
 
 from src.visualization.model_plots import plot_feature_importance, plot_history
 
@@ -223,6 +224,72 @@ class RankingAnalyzer:
             "p_value": p_value,
             "n_months": T,
             "top_k": top_k,
+            "model": "ensemble",
+            "interpretation": (
+                "Significantly positive alpha (reject H0)" if (p_value < 0.05 and mean > 0)
+                else "Significantly negative alpha (reject H0)" if (p_value < 0.05 and mean < 0)
+                else "No statistically significant alpha (fail to reject H0)"
+            ),
+            "predictive_power": (
+                "YES" if (p_value < 0.05 and mean > 0)
+                else "NO"
+            )
+        }])
+
+    def t_test_long_short_nw(
+        self,
+        top_k: int = 10,
+        lag: int = 3,  # HAC lag (3–6 months typical)
+    ) -> pd.DataFrame:
+
+        scores = self.ensemble.predict(self.X_test, groups=self.group_test)
+
+        y = self.y_test.iloc[:, 0].to_numpy()
+        groups = self.group_test
+
+        long_short_returns = []
+
+        cursor = 0
+        for g in groups:
+            sl = slice(cursor, cursor + g)
+
+            s = scores[sl]
+            r = y[sl]
+
+            k = min(top_k, g // 2)
+
+            order = np.argsort(s)
+
+            long_idx = order[-k:]
+            short_idx = order[:k]
+
+            r_long = np.mean(r[long_idx])
+            r_short = np.mean(r[short_idx])
+
+            long_short_returns.append(r_long - r_short)
+
+            cursor += g
+
+        R = np.array(long_short_returns)
+
+        # =========================
+        # NEWEY-WEST t-test
+        # =========================
+        X = np.ones(len(R))
+        model = sm.OLS(R, X).fit(cov_type="HAC", cov_kwds={"maxlags": lag})
+
+        mean = R.mean()
+        t_stat = model.tvalues[0]
+        p_value = model.pvalues[0]
+
+        return pd.DataFrame([{
+            "mean_return": mean,
+            "std_return": R.std(ddof=1),
+            "t_stat_newey_west": t_stat,
+            "p_value": p_value,
+            "n_months": len(R),
+            "top_k": top_k,
+            "hac_lag": lag,
             "model": "ensemble",
             "interpretation": (
                 "Significantly positive alpha (reject H0)" if (p_value < 0.05 and mean > 0)

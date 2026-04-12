@@ -102,6 +102,7 @@ class FeaturePipeline:
             "yyyymm",
             "ret",
             "market_cap_musd",
+            "sector",
             "ret_1m",
             "ret_3m",
             "ret_6m",
@@ -117,7 +118,7 @@ class FeaturePipeline:
         features = self._add_centroid_feature(features, groups)
         features = self._drop_low_variance(features, fit=True)
         features = self._impute(features, fit=True)
-        features = self._scale(features, fit=True)
+        features = self._scale(features, X["sector"], fit=True)
         features = self._fit_ridge(features, y)
         # features = self._fit_autoencoder(features)
         features = self._apply_pca(features, fit=True)
@@ -138,6 +139,7 @@ class FeaturePipeline:
             "yyyymm",
             "ret",
             "market_cap_musd",
+            "sector",
             "ret_1m",
             "ret_3m",
             "ret_6m",
@@ -152,9 +154,8 @@ class FeaturePipeline:
         features = self._apply_cs_transforms(features, groups=None, fit=False)
         features = self._add_centroid_feature(features, groups=None)
         features = self._select_cols(features)
-
         features = self._impute(features, fit=False)
-        features = self._scale(features, fit=False)
+        features = self._scale(features, X["sector"], fit=False)
         features = self._apply_ridge(features)
         # features = self._apply_autoencoder(features)
         features = self._apply_pca(features, fit=False)
@@ -242,23 +243,67 @@ class FeaturePipeline:
             return X.fillna(self._impute_values)
         raise ValueError(f"Unknown impute strategy '{strategy}'. Use 'median', 'zero', or null.")
 
-    def _scale(self, X: pd.DataFrame, fit: bool) -> pd.DataFrame:
+    def _scale(self, X: pd.DataFrame, sector: pd.Series, fit: bool) -> pd.DataFrame:
         strategy = self.cfg.get("scale", None)
         if strategy is None:
             return X
+
+        X = X.copy()
+
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+
         if strategy == "standard":
             if fit:
-                self._scale_mean = X.mean(skipna=True)
-                self._scale_std = X.std(skipna=True).replace(0, 1)
-            return (X - self._scale_mean) / self._scale_std
+                self._scale_mean = X[numeric_cols].mean()
+                self._scale_std = X[numeric_cols].std().replace(0, 1)
+
+            X[numeric_cols] = (X[numeric_cols] - self._scale_mean) / self._scale_std
+            return X
+
         if strategy == "minmax":
             if fit:
-                self._scale_min = X.min(skipna=True)
-                self._scale_max = X.max(skipna=True)
-                denom = (self._scale_max - self._scale_min).replace(0, 1)
-                self._scale_range = denom
-            return (X - self._scale_min) / self._scale_range
-        raise ValueError(f"Unknown scale strategy '{strategy}'. Use 'standard', 'minmax', or null.")
+                self._scale_min = X[numeric_cols].min()
+                self._scale_max = X[numeric_cols].max()
+                self._scale_range = (self._scale_max - self._scale_min).replace(0, 1)
+
+            X[numeric_cols] = (X[numeric_cols] - self._scale_min) / self._scale_range
+            return X
+
+        if strategy in ["standard_sector", "minmax_sector"]:
+            X_scaled = X.copy()
+
+            if fit:
+                self._sector_stats = {}
+
+            for sec in sector.unique():
+                idx = sector[sector == sec].index
+
+                if strategy == "standard_sector":
+                    if fit:
+                        mean = X.loc[idx, numeric_cols].mean()
+                        std = X.loc[idx, numeric_cols].std().replace(0, 1)
+                        self._sector_stats[sec] = (mean, std)
+
+                    mean, std = self._sector_stats[sec]
+                    X_scaled.loc[idx, numeric_cols] = (
+                        X.loc[idx, numeric_cols] - mean
+                    ) / std
+
+                elif strategy == "minmax_sector":
+                    if fit:
+                        min_ = X.loc[idx, numeric_cols].min()
+                        max_ = X.loc[idx, numeric_cols].max()
+                        rng = (max_ - min_).replace(0, 1)
+                        self._sector_stats[sec] = (min_, rng)
+
+                    min_, rng = self._sector_stats[sec]
+                    X_scaled.loc[idx, numeric_cols] = (
+                        X.loc[idx, numeric_cols] - min_
+                    ) / rng
+
+            return X_scaled
+
+        raise ValueError(f"Unknown scaling strategy: {strategy}")
 
     def _add_centroid_feature(
         self,

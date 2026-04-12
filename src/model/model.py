@@ -28,7 +28,7 @@ except ImportError:
 # Random baseline = 10%; good models reach 15–30% (consistent with paper Table 5).
 # ---------------------------------------------------------------------------
 
-_META = {"permno", "yyyymm", "ret", "market_cap_musd", "ret_1m", "ret_3m", "ret_6m"}
+_META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
 
 def _rank_precision_xgb(groups_list: list[list[int]]):
     """XGBoost custom eval: rank precision at top decile.
@@ -53,7 +53,6 @@ def _rank_precision_xgb(groups_list: list[list[int]]):
             cursor += g
         return "rank_prec@decile", float(np.mean(precisions))
     return eval_fn
-
 
 def _rank_precision_lgb():
     """LightGBM custom eval: rank precision at top decile."""

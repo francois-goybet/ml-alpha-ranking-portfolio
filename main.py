@@ -31,6 +31,7 @@ def main(args):
     X_train, y_train, group_train = s["train"]
     X_val, y_val, group_val = s["val"]
     X_test, y_test, group_test = s["test"]
+    print(X_train.columns)
 
     # Preprocessing pipeline
     fp_cfg = config.get("feature_pipeline", {})
@@ -44,7 +45,6 @@ def main(args):
     
     model = MultiHorizonRanker(**model_cfg)
     model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
-    
     # HorizonEnsemble
     weights = config.get("ensemble", {}).get("weights", None)
     combination = config.get("ensemble", {}).get("combination", "mean_rank")
@@ -59,6 +59,8 @@ def main(args):
     analyzer = RankingAnalyzer(model, ensemble, X_test, group_test, y_test)
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
     df_long_short_test = analyzer.t_test_long_short(top_k=10, alternative="greater")
+    df_long_short_test_nw = analyzer.t_test_long_short_nw(top_k=10, lag=3)
+
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
 
@@ -79,6 +81,8 @@ def main(args):
     wandb.log({"test_metrics": wandb_table})
     wandb_table_long_short = wandb.Table(dataframe=df_long_short_test)
     wandb.log({"long_short_test": wandb_table_long_short})
+    wandb_table_long_short_nw = wandb.Table(dataframe=df_long_short_test_nw)
+    wandb.log({"long_short_test_nw": wandb_table_long_short_nw})
 
     wandb.finish()
 

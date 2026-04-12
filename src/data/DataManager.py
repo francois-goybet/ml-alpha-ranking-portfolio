@@ -12,6 +12,7 @@ _CONSTRUCTION_DIR = _DATA_DIR / "construction"
 _DATASET_PARQUET = _DATA_DIR / "dataset.parquet"
 _SIGNAL_DOC_PARQUET = _DATA_DIR / "signal_doc.parquet"
 _CHUNK_SIZE = 20
+_META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
 
 
 class DataManager:
@@ -213,7 +214,6 @@ class DataManager:
             .reset_index(drop=True)
         )
 
-        _META = {"permno", "yyyymm", "ret", "market_cap_musd", "ret_1m", "ret_3m", "ret_6m"}
         feature_cols = [c for c in df.columns if c not in _META]
 
         targets_list = [targets] if isinstance(targets, str) else list(targets)
@@ -236,7 +236,7 @@ class DataManager:
         X = X.replace([np.inf, -np.inf], np.nan)
         # Convert any pandas nullable / extension dtypes to plain numpy float64
         # so XGBoost/LightGBM can consume the array without TypeError on pd.NA.
-        X = X.apply(lambda col: col.astype("float64") if not col.dtype == np.float64 else col)
+        X = X.apply(lambda col: col.astype("float64") if ((not col.dtype == np.float64) and (col.name not in _META)) else col)
         return X
 
     def _load_crsp(self, start: str, end: str, market_cap: float) -> pd.DataFrame:
@@ -382,3 +382,87 @@ class DataManager:
             _CONSTRUCTION_DIR.rmdir()
         except OSError:
             pass
+
+    def _get_sector_mapping(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        """Get a mapping from (permno, date) to sector using WRDS CRSP-Compustat link.
+        Steps:
+        1. Extract unique permnos from the dataset.
+        2. Connect to WRDS and query the CRSP-Compustat link table to get SIC codes.
+        3. Convert SIC codes to sectors.
+        4. Return a DataFrame with columns (permno, date, sector).
+        """
+        permnos = dataset["permno"].unique().tolist()  # ou ta liste
+        permno_str = ",".join(map(str, permnos))
+
+        dataset["date"] = pd.to_datetime(dataset["yyyymm"].astype(str) + "01")
+        import wrds
+        db = wrds.Connection()
+
+
+        query = f"""
+        SELECT
+            l.lpermno AS permno,
+            l.linkdt,
+            l.linkenddt,
+            c.sic
+        FROM crsp.ccmxpf_linktable l
+        JOIN comp.company c
+            ON l.gvkey = c.gvkey
+        WHERE l.lpermno IN ({permno_str})
+        AND l.linktype IN ('LU','LC')
+        AND l.linkprim IN ('P','C')
+        """
+
+        map_df = db.raw_sql(query)
+
+        # =========================
+        # DATE CONVERSION
+        # =========================
+        map_df["linkdt"] = pd.to_datetime(map_df["linkdt"])
+        map_df["linkenddt"] = pd.to_datetime(map_df["linkenddt"])
+
+        # =========================
+        # MERGE (time-consistent join)
+        # =========================
+        df = dataset.merge(map_df, on="permno", how="left")
+
+        df = df[
+            (df["date"] >= df["linkdt"]) &
+            (df["date"] <= df["linkenddt"].fillna(pd.Timestamp("2099-12-31")))
+        ]
+
+        # =========================
+        # SIC → SECTOR
+        # =========================
+        def sic_to_sector(sic):
+            if pd.isna(sic):
+                return "Unknown"
+            elif 1000 <= sic < 1500:
+                return "Energy"
+            elif 1500 <= sic < 3000:
+                return "Industrials"
+            elif 3000 <= sic < 4000:
+                return "Manufacturing"
+            elif 4000 <= sic < 5000:
+                return "Utilities"
+            elif 5000 <= sic < 6000:
+                return "Retail"
+            elif 6000 <= sic < 7000:
+                return "Financials"
+            elif 7000 <= sic < 8000:
+                return "Tech"
+            elif 8000 <= sic < 9000:
+                return "Healthcare"
+            else:
+                return "Other"
+
+        df["sector"] = df["sic"].astype(int).apply(sic_to_sector)
+
+        # =========================
+        # FINAL OUTPUT (optional mapping)
+        # =========================
+        df.drop(columns=["linkdt", "linkenddt", "sic", "date"], inplace=True)
+        cols = df.columns.tolist()
+        cols.insert(3, cols.pop(cols.index("sector")))
+        df = df[cols]
+        return df

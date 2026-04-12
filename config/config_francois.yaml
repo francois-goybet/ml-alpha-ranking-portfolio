@@ -33,7 +33,7 @@ feature_pipeline:
   cross_sectional_rank: True   # rank-normalise each feature within each month to [0, 1]
   winsorize: null        # clip at 1st/99th percentile per month
   impute: median               # fill NaNs with per-feature train median
-  scale: null                 # no global scaling (CS rank already normalises)
+  scale: standard_sector       # standardize features within each sector
   drop_low_variance: 0.0       # drop constant features
   pca: null                    # no PCA
   centroid_feature: False       # add L2 distance to monthly centroid as a feature
