@@ -194,6 +194,20 @@ class DataManager:
         for lag in return_lags:
             df[f"ret_lag{lag}"] = df.groupby("permno")["ret"].shift(lag)
 
+        # Optionally replace point-in-time targets with mean/median over the horizon.
+        # ret_1m_agg = agg(ret_{t+1})                  → same as ret_1m (single period)
+        # ret_3m_agg = agg(ret_{t+1}, ret_{t+2}, ret_{t+3})
+        # ret_6m_agg = agg(ret_{t+1}, ..., ret_{t+6})
+        target_agg = self.data_config.get("target_aggregation", None)
+        if target_agg in ("mean", "median"):
+            agg_fn = (lambda s: s.mean()) if target_agg == "mean" else (lambda s: s.median())
+            grp = df.groupby("permno")["ret"]
+            horizons = {"ret_1m": 1, "ret_3m": 3, "ret_6m": 6}
+            for col, h in horizons.items():
+                fwd_cols = [grp.shift(-k) for k in range(1, h + 1)]
+                df[col] = pd.concat(fwd_cols, axis=1).apply(agg_fn, axis=1)
+            print(f"  [DataManager] Targets replaced with {target_agg} over horizon window.")
+
         start_date = start or self.data_config.get(f"{split}_start")
         end_date = end or self.data_config.get(f"{split}_end")
 

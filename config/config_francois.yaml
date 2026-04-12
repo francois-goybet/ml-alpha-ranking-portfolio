@@ -8,7 +8,8 @@ data:
   test_start: 2021-03-01
   test_end: 2024-12-31
   market_cap: 10
-  return_lags: [1, 2, 3, 6]  # lagged monthly return features to add as predictors
+  return_lags: []  # lagged monthly return features to add as predictors
+  target_aggregation: mean  # null | "mean" | "median" — replace targets with mean/median over the horizon window
 
 model:
   backend: xgboost
@@ -31,9 +32,9 @@ pipeline:
   verbose: false          # show boosting round logs during training
 
 feature_pipeline:
-  cross_sectional_rank: True   # rank-normalise each feature within each month to [0, 1]
+  cross_sectional_rank: False   # rank-normalise each feature within each month to [0, 1]
   winsorize: null        # clip at 1st/99th percentile per month
-  impute: median               # fill NaNs with per-feature train median
+  impute: zero               # fill NaNs with per-feature train median
   scale: null                 # no global scaling (CS rank already normalises)
   drop_low_variance: 0.0       # drop constant features
   pca: null                    # no PCA
@@ -41,17 +42,17 @@ feature_pipeline:
   ridge_features:
     targets: [ret_1m, ret_3m, ret_6m]
     alpha: 10000000000000          # Ridge regularisation strength
-  autoencoder:
-    hidden_dims: [32, 16, 8]
-    variational: true
-    beta: 1.0          # or e.g. 4.0 for beta-VAE
-    epochs: 50
-    batch_size: 512
-    lr: 1e-3
-    weight_decay: 1e-5
-    dropout: 0.1
-    replace_features: False      # true → keep only latent cols; false → append
-    device: "mps"                # "mps" for Apple Silicon
+  # autoencoder:
+  #   hidden_dims: [32, 16, 8]
+  #   variational: true
+  #   beta: 1.0          # or e.g. 4.0 for beta-VAE
+  #   epochs: 50
+  #   batch_size: 512
+  #   lr: 1e-3
+  #   weight_decay: 1e-5
+  #   dropout: 0.1
+  #   replace_features: False      # true → keep only latent cols; false → append
+  #   device: "mps"                # "mps" for Apple Silicon
 
 ensemble:
   enabled: true
