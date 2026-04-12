@@ -8,6 +8,7 @@ from src.data.DataManager import DataManager
 from src.data.feature_pipeline import FeaturePipeline
 from src.model.model import MultiHorizonRanker, HorizonEnsemble, _LABEL_ENCODERS
 from src.model.RankingAnalyzer import RankingAnalyzer
+from src.portfolio.PortfolioAnalyzer import PortfolioAnalyzer
 
 import wandb
 
@@ -45,11 +46,24 @@ def main(args):
     
     model = MultiHorizonRanker(**model_cfg)
     model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
+    
     # HorizonEnsemble
     weights = config.get("ensemble", {}).get("weights", None)
     combination = config.get("ensemble", {}).get("combination", "mean_rank")
-
     ensemble = HorizonEnsemble(model, combination=combination, weights=weights)
+
+    # Portfolio analysis
+    rf_df = data_manager.get_rf(start=config["data"].get("test_start", "1990-01-01"))
+    portfolio_analyzer = PortfolioAnalyzer(rf_df, X_test, y_test)
+    rf_fig = portfolio_analyzer.pnl_rf()
+    custom_strategy_df = pd.DataFrame({
+        "yyyymm": X_test["yyyymm"].unique().astype(int),
+        "permno": 93436, 
+        "weight": 1.0
+    })
+
+    custom_strategy_fig = portfolio_analyzer.pnl_custom_strategy(custom_strategy_df)
+
 
     # Ranking analysis
     label_encoder_name = config.get("model", {}).get("label_encoder", "argsort")
@@ -58,12 +72,11 @@ def main(args):
 
     analyzer = RankingAnalyzer(model, ensemble, X_test, group_test, y_test)
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
-    df_long_short_test = analyzer.t_test_long_short(top_k=10, alternative="greater")
-    df_long_short_test_nw = analyzer.t_test_long_short_nw(top_k=10, lag=3)
+    df_long_short_test = analyzer.t_test_long_short(percentage= .1, alternative="greater")
+    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
 
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
-
 
     # Saving results to Weights & Biases
 
@@ -83,6 +96,9 @@ def main(args):
     wandb.log({"long_short_test": wandb_table_long_short})
     wandb_table_long_short_nw = wandb.Table(dataframe=df_long_short_test_nw)
     wandb.log({"long_short_test_nw": wandb_table_long_short_nw})
+
+    wandb.log({"rf_fig": wandb.Plotly(rf_fig)})
+    wandb.log({"custom_strategy_fig": wandb.Plotly(custom_strategy_fig)})
 
     wandb.finish()
 

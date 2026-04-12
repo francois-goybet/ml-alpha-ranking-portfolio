@@ -7,10 +7,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import wrds
+
 _DATA_DIR = Path("data")
 _CONSTRUCTION_DIR = _DATA_DIR / "construction"
 _DATASET_PARQUET = _DATA_DIR / "dataset.parquet"
 _SIGNAL_DOC_PARQUET = _DATA_DIR / "signal_doc.parquet"
+_RF_PARQUET = _DATA_DIR / "rf.parquet"
 _CHUNK_SIZE = 20
 _META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
 
@@ -169,6 +172,29 @@ class DataManager:
             "val":   (X_val,   y_val,   groups_val),
             "test":  (X_test,  y_test,  groups_test),
         }
+
+    def get_rf(self, start):
+        
+        if _RF_PARQUET.exists():
+            return pd.read_parquet(_RF_PARQUET)
+
+        db = wrds.Connection()
+
+        query = f"""
+        select
+            extract(year from date)*100 + extract(month from date) as yyyymm,
+            rf
+        from ff.factors_monthly
+        where date >= '{start}'
+        order by date
+        """
+
+        df = db.raw_sql(query)
+
+        # convert rf from % to decimal
+        df["rf"] = df["rf"] / 100.0
+        df.to_parquet(_RF_PARQUET, index=False)
+        return df
 
     # ------------------------------------------------------------------
     # Private helpers

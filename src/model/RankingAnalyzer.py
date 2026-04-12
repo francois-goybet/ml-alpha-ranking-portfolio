@@ -158,7 +158,7 @@ class RankingAnalyzer:
 
     def t_test_long_short(
         self,
-        top_k: int = 10,
+        percentage: int = .1,
         alternative: str = "greater",  # "greater" or "two-sided"
         ) -> pd.DataFrame:
         """
@@ -172,6 +172,7 @@ class RankingAnalyzer:
 
         H0: E[R_long-short] = 0
         """
+        top_k = int(percentage * np.min(self.group_test))  # ensure top_k is feasible for all months
 
         scores = self.ensemble.predict(self.X_test, groups=self.group_test)
 
@@ -224,6 +225,7 @@ class RankingAnalyzer:
             "p_value": p_value,
             "n_months": T,
             "top_k": top_k,
+            "percentage": percentage,
             "model": "ensemble",
             "interpretation": (
                 "Significantly positive alpha (reject H0)" if (p_value < 0.05 and mean > 0)
@@ -238,10 +240,11 @@ class RankingAnalyzer:
 
     def t_test_long_short_nw(
         self,
-        top_k: int = 10,
+        percentage: int = .1,
         lag: int = 3,  # HAC lag (3–6 months typical)
     ) -> pd.DataFrame:
 
+        top_k = int(percentage * np.min(self.group_test))  # ensure top_k is feasible for all months
         scores = self.ensemble.predict(self.X_test, groups=self.group_test)
 
         y = self.y_test.iloc[:, 0].to_numpy()
@@ -289,6 +292,7 @@ class RankingAnalyzer:
             "p_value": p_value,
             "n_months": len(R),
             "top_k": top_k,
+            "percentage": percentage,
             "hac_lag": lag,
             "model": "ensemble",
             "interpretation": (
