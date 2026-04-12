@@ -81,6 +81,7 @@ class DataManager:
         # If the final dataset already exists, clean up and return it.
         if _DATASET_PARQUET.exists():
             self._clean_construction_files()
+            
             return pd.read_parquet(_DATASET_PARQUET)
 
         _CONSTRUCTION_DIR.mkdir(parents=True, exist_ok=True)
@@ -212,7 +213,7 @@ class DataManager:
             .reset_index(drop=True)
         )
 
-        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+        _META = {"permno", "yyyymm", "ret", "market_cap_musd", "ret_1m", "ret_3m", "ret_6m"}
         feature_cols = [c for c in df.columns if c not in _META]
 
         targets_list = [targets] if isinstance(targets, str) else list(targets)
@@ -245,8 +246,9 @@ class DataManager:
         -----
         1. Connect to WRDS.
         2. Pull ``crsp.msf`` filtered by market cap and date range.
-        3. Build a ``yyyymm`` integer key.
-        4. Compute forward returns: ``ret_1m``, ``ret_3m``, ``ret_6m``.
+        3. Keep monthly market capitalisation in millions USD.
+        4. Build a ``yyyymm`` integer key.
+        5. Compute forward returns: ``ret_1m``, ``ret_3m``, ``ret_6m``.
         """
         import wrds
 
@@ -284,14 +286,16 @@ class DataManager:
         Returns
         -------
         pd.DataFrame
-            Columns: ``permno``, ``yyyymm``, ``ret``, ``ret_1m``, ``ret_3m``,
-            ``ret_6m``.
+            Columns: ``permno``, ``yyyymm``, ``ret``, ``market_cap_musd``,
+            ``ret_1m``, ``ret_3m``, ``ret_6m``.
         """
         df["date"] = pd.to_datetime(df["date"])
         df["yyyymm"] = df["date"].dt.strftime("%Y%m").astype(int)
         df["permno"] = df["permno"].astype(int)
 
-        df = df[["permno", "yyyymm", "ret"]].sort_values(["permno", "yyyymm"])
+        df = df[["permno", "yyyymm", "ret", "market_cap_musd"]].sort_values(
+            ["permno", "yyyymm"]
+        )
 
         df["ret_1m"] = df.groupby("permno")["ret"].shift(-1)
         df["ret_3m"] = df.groupby("permno")["ret"].shift(-3)
@@ -347,7 +351,15 @@ class DataManager:
         if not files:
             raise RuntimeError("No construction parquet files found to merge.")
 
-        base_cols = ["permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"]
+        base_cols = [
+            "permno",
+            "yyyymm",
+            "ret",
+            "market_cap_musd",
+            "ret_1m",
+            "ret_3m",
+            "ret_6m",
+        ]
         dfs = [pd.read_parquet(f) for f in files]
 
         merged = reduce(

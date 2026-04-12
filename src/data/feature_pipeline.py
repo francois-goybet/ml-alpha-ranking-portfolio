@@ -97,7 +97,15 @@ class FeaturePipeline:
         y: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         """Fit on X (and optionally y for Ridge features) and return transformed copy."""
-        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+        _META = {
+            "permno",
+            "yyyymm",
+            "ret",
+            "market_cap_musd",
+            "ret_1m",
+            "ret_3m",
+            "ret_6m",
+        }
 
         X = X.copy()
 
@@ -125,7 +133,15 @@ class FeaturePipeline:
         if not self._fitted:
             raise RuntimeError("Call fit_transform() on the train set first.")
 
-        _META = {"permno", "yyyymm", "ret", "ret_1m", "ret_3m", "ret_6m"}
+        _META = {
+            "permno",
+            "yyyymm",
+            "ret",
+            "market_cap_musd",
+            "ret_1m",
+            "ret_3m",
+            "ret_6m",
+        }
 
         X = X.copy()
 

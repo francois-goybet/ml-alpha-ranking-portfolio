@@ -58,9 +58,18 @@ def main(args):
 
     analyzer = RankingAnalyzer(model, ensemble, X_test, group_test, y_test)
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
+    df_long_short_test = analyzer.t_test_long_short(top_k=10, alternative="greater")
+    features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
 
+
     # Saving results to Weights & Biases
+
+    for target, fig in features_importance_figs.items():
+        wandb.log({
+            f"feature_importance/{target}": wandb.Plotly(fig)
+        })
+
     for h, fig in zip(history.keys(), figs):
         wandb.log({
             f"history/{h}": wandb.Plotly(fig)
@@ -68,6 +77,9 @@ def main(args):
 
     wandb_table = wandb.Table(dataframe=df_metrics)
     wandb.log({"test_metrics": wandb_table})
+    wandb_table_long_short = wandb.Table(dataframe=df_long_short_test)
+    wandb.log({"long_short_test": wandb_table_long_short})
+
     wandb.finish()
 
 if __name__ == "__main__":

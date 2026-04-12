@@ -74,3 +74,30 @@ def plot_history(history):
         figures.append(fig)
 
     return figures
+
+def plot_feature_importance(importance, target):
+    df_features_importance = pd.DataFrame({
+        "feature": importance[0],
+        "importance": importance[1]
+    })
+
+    df_features_importance = df_features_importance.sort_values(
+        by="importance",
+        ascending=False
+    ).head(10)
+
+    fig = px.bar(
+        df_features_importance,
+        x="importance",
+        y="feature",
+        orientation="h",
+        title=f"Feature Importance for {target}"
+    )
+
+    fig.update_layout(
+        yaxis=dict(categoryorder='total ascending'),
+        height=600,  
+        margin=dict(l=150, r=50, t=50, b=50)  
+    )
+
+    return fig

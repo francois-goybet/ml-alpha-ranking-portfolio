@@ -1,10 +1,11 @@
 from typing import Optional
 import numpy as np
 import pandas as pd
+from scipy import stats
 from src.model.model import MultiHorizonRanker, HorizonEnsemble
 from sklearn.metrics import roc_auc_score
 
-from src.visualization.model_plots import plot_history
+from src.visualization.model_plots import plot_feature_importance, plot_history
 
 """RankingAnalyzer for evaluating multi-horizon ranking models."""
 
@@ -143,6 +144,96 @@ class RankingAnalyzer:
         history = self.model.get_history()
         figs = plot_history(history)
         return history, figs
+
+    def get_features_importance_figures(self):
+        importance = self.model.get_feature_importance()
+        figs = {}
+        for target, features_importance in importance.items():  
+            x = features_importance.keys()
+            y = features_importance.values()
+            fig = plot_feature_importance((x,y), target)
+            figs[target] = fig
+        return figs
+
+    def t_test_long_short(
+        self,
+        top_k: int = 10,
+        alternative: str = "greater",  # "greater" or "two-sided"
+        ) -> pd.DataFrame:
+        """
+        Computes a Fama-French style t-test on ensemble predictions only.
+
+        Steps:
+        - Each month: rank stocks using ensemble score
+        - Build long (top_k) and short (bottom_k) portfolio
+        - Compute monthly long-short returns
+        - Run one-sample t-test on mean return
+
+        H0: E[R_long-short] = 0
+        """
+
+        scores = self.ensemble.predict(self.X_test, groups=self.group_test)
+
+        y = self.y_test.iloc[:, 0].to_numpy()  # assumes single reference target
+        groups = self.group_test
+
+        long_short_returns = []
+
+        cursor = 0
+        for g in groups:
+            sl = slice(cursor, cursor + g)
+
+            s = scores[sl]
+            r = y[sl]
+
+            k = min(top_k, g // 2)
+
+            order = np.argsort(s)
+
+            short_idx = order[:k]
+            long_idx = order[-k:]
+
+            r_long = np.mean(r[long_idx])
+            r_short = np.mean(r[short_idx])
+
+            long_short_returns.append(r_long - r_short)
+
+            cursor += g
+
+        R = np.array(long_short_returns)
+
+        # =========================
+        # stats
+        # =========================
+        mean = R.mean()
+        std = R.std(ddof=1)
+        T = len(R)
+
+        t_stat = mean / (std / np.sqrt(T)) if std > 0 else np.nan
+
+        if alternative == "greater":
+            p_value = stats.t.sf(t_stat, df=T - 1)
+        else:
+            p_value = stats.t.sf(np.abs(t_stat), df=T - 1) * 2
+
+        return pd.DataFrame([{
+            "mean_return": mean,
+            "std_return": std,
+            "t_stat": t_stat,
+            "p_value": p_value,
+            "n_months": T,
+            "top_k": top_k,
+            "model": "ensemble",
+            "interpretation": (
+                "Significantly positive alpha (reject H0)" if (p_value < 0.05 and mean > 0)
+                else "Significantly negative alpha (reject H0)" if (p_value < 0.05 and mean < 0)
+                else "No statistically significant alpha (fail to reject H0)"
+            ),
+            "predictive_power": (
+                "YES" if (p_value < 0.05 and mean > 0)
+                else "NO"
+            )
+        }])
 
     def ndcg_at_k(self, scores, labels, k):
         order = np.argsort(scores)[::-1][:k]
