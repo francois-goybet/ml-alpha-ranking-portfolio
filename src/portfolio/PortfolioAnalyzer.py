@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from src.visualization.portfolio_plots import plot_pnl
+from src.visualization.portfolio_plots import plot_pnl, plot_drawdown
 
 
 class PortfolioAnalyzer:
@@ -32,7 +32,7 @@ class PortfolioAnalyzer:
         }), title="Risk-Free PnL")
         return fig
   
-    def pnl_custom_strategy(self, strategy_df: pd.DataFrame):
+    def pnl_custom_strategy(self, strategy_df: pd.DataFrame, strategy_name: str = "Custom Strategy"):
         """
         Portfolio PnL with stocks + risk-free asset.
 
@@ -44,11 +44,8 @@ class PortfolioAnalyzer:
             columns = ["yyyymm", "rf"]
 
         Returns:
-            DataFrame: ["yyyymm", "wealth"]
+            tuple: (pnl figure, drawdown figure, metrics dataframe)
         """
-
-        import pandas as pd
-        import numpy as np
 
         strat = strategy_df.copy()
 
@@ -97,4 +94,48 @@ class PortfolioAnalyzer:
         port["wealth"] = wealth_list
 
         df = port[["yyyymm", "wealth"]]
-        return plot_pnl(df, title="Custom Strategy PnL") 
+
+        # --- 9. Compute requested performance metrics
+        monthly_ret = port["weighted_ret"].astype(float)
+        n_months = int(monthly_ret.shape[0])
+
+        mean_ret = float(monthly_ret.mean()) if n_months > 0 else np.nan
+        std_ret = float(monthly_ret.std(ddof=1)) if n_months > 1 else np.nan
+
+        annualized_sharpe = np.nan
+        if n_months > 1 and std_ret and std_ret > 0:
+            annualized_sharpe = (mean_ret / std_ret) * np.sqrt(12)
+
+        annualized_return = np.nan
+        if n_months > 0:
+            ending_wealth = float(df["wealth"].iloc[-1])
+            annualized_return = ending_wealth ** (12 / n_months) - 1
+
+        rolling_peak = df["wealth"].cummax()
+        drawdown = (df["wealth"] / rolling_peak) - 1
+        df_drawdown = pd.DataFrame({
+            "yyyymm": df["yyyymm"],
+            "drawdown": drawdown
+        })
+        max_drawdown = float(drawdown.min()) if n_months > 0 else np.nan
+
+        wins = monthly_ret[monthly_ret > 0]
+        losses = monthly_ret[monthly_ret < 0]
+        avg_win = float(wins.mean()) if not wins.empty else np.nan
+        avg_loss = float(losses.mean()) if not losses.empty else np.nan
+
+        metrics_df = pd.DataFrame([
+            {
+                "annualized_sharpe_ratio": annualized_sharpe,
+                "annualized_return": annualized_return,
+                "max_drawdown": max_drawdown,
+                "AvgWin": avg_win,
+                "AvgLoss": avg_loss,
+                "Total Month": n_months,
+            }
+        ])
+
+        pnl_fig = plot_pnl(df, title=strategy_name + " PnL")
+        drawdown_fig = plot_drawdown(df_drawdown, title=strategy_name + " Drawdown")
+
+        return pnl_fig, drawdown_fig, metrics_df

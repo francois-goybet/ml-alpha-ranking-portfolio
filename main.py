@@ -9,6 +9,7 @@ from src.data.feature_pipeline import FeaturePipeline
 from src.model.model import MultiHorizonRanker, HorizonEnsemble, _LABEL_ENCODERS
 from src.model.RankingAnalyzer import RankingAnalyzer
 from src.portfolio.PortfolioAnalyzer import PortfolioAnalyzer
+from src.portfolio.PortfolioConstruction import PortfolioConstruction
 
 import wandb
 
@@ -52,18 +53,6 @@ def main(args):
     combination = config.get("ensemble", {}).get("combination", "mean_rank")
     ensemble = HorizonEnsemble(model, combination=combination, weights=weights)
 
-    # Portfolio analysis
-    rf_df = data_manager.get_rf(start=config["data"].get("test_start", "1990-01-01"))
-    portfolio_analyzer = PortfolioAnalyzer(rf_df, X_test, y_test)
-    rf_fig = portfolio_analyzer.pnl_rf()
-    custom_strategy_df = pd.DataFrame({
-        "yyyymm": X_test["yyyymm"].unique().astype(int),
-        "permno": 93436, 
-        "weight": 1.0
-    })
-
-    custom_strategy_fig = portfolio_analyzer.pnl_custom_strategy(custom_strategy_df)
-
 
     # Ranking analysis
     label_encoder_name = config.get("model", {}).get("label_encoder", "argsort")
@@ -74,9 +63,33 @@ def main(args):
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
     df_long_short_test = analyzer.t_test_long_short(percentage= .1, alternative="greater")
     df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
-
+    df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
+
+    # Strategies
+    rf_df = data_manager.get_rf(start=config["data"].get("test_start", "1990-01-01"))
+    
+    portfolio_construction = PortfolioConstruction(rf_df, X_test, y_test, ensemble.predict(X_test, group_test))
+    portfolio_analyzer = PortfolioAnalyzer(rf_df, X_test, y_test)
+    
+    strategies = config.get("strategies", ["top_1"])
+    strategy_dfs = {}
+    for strategy_name in strategies:
+        print(f"Evaluating strategy: {strategy_name}")
+        strategy_fn = portfolio_construction.strategies.get(strategy_name)
+        if strategy_fn is None:
+            raise ValueError(f"Strategy '{strategy_name}' not found in PortfolioConstruction.")
+        strategy_df = strategy_fn()
+        pnl, dropdown, metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name)
+        wandb.log({
+            f"{strategy_name}_pnl": wandb.Plotly(pnl),
+            f"{strategy_name}_drawdown": wandb.Plotly(dropdown)
+        })
+        wandb_table_metrics = wandb.Table(dataframe=metrics)
+        wandb.log({f"{strategy_name}_metrics": wandb_table_metrics})
+        wandb_table_strategy = wandb.Table(dataframe=strategy_df)
+        wandb.log({f"{strategy_name}_weights": wandb_table_strategy})  
 
     # Saving results to Weights & Biases
 
@@ -93,12 +106,7 @@ def main(args):
     wandb_table = wandb.Table(dataframe=df_metrics)
     wandb.log({"test_metrics": wandb_table})
     wandb_table_long_short = wandb.Table(dataframe=df_long_short_test)
-    wandb.log({"long_short_test": wandb_table_long_short})
-    wandb_table_long_short_nw = wandb.Table(dataframe=df_long_short_test_nw)
-    wandb.log({"long_short_test_nw": wandb_table_long_short_nw})
-
-    wandb.log({"rf_fig": wandb.Plotly(rf_fig)})
-    wandb.log({"custom_strategy_fig": wandb.Plotly(custom_strategy_fig)})
+    wandb.log({"df_long_short_test": wandb_table_long_short})
 
     wandb.finish()
 

@@ -219,6 +219,7 @@ class RankingAnalyzer:
             p_value = stats.t.sf(np.abs(t_stat), df=T - 1) * 2
 
         return pd.DataFrame([{
+            "name": "t-test_long_short",
             "mean_return": mean,
             "std_return": std,
             "t_stat": t_stat,
@@ -286,14 +287,15 @@ class RankingAnalyzer:
         p_value = model.pvalues[0]
 
         return pd.DataFrame([{
+            "name": f"long_short_nw_lag{lag}",
             "mean_return": mean,
             "std_return": R.std(ddof=1),
-            "t_stat_newey_west": t_stat,
+            "t_stat": t_stat,
             "p_value": p_value,
             "n_months": len(R),
             "top_k": top_k,
             "percentage": percentage,
-            "hac_lag": lag,
+            # "hac_lag": lag,
             "model": "ensemble",
             "interpretation": (
                 "Significantly positive alpha (reject H0)" if (p_value < 0.05 and mean > 0)

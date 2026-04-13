@@ -20,6 +20,7 @@ def parse_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     pipeline_cfg = config.get("pipeline", {})
     ensemble_cfg = config.get("ensemble", {})
     feature_pipeline_cfg = config.get("feature_pipeline", {})
+    strategies = config.get("strategies", [])
 
     if not isinstance(data_cfg, dict):
         raise TypeError("'data' section must be a dictionary.")
@@ -38,6 +39,7 @@ def parse_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         "pipeline": pipeline_cfg,
         "ensemble": ensemble_cfg,
         "feature_pipeline": feature_pipeline_cfg,
+        "strategies": strategies,
     }
 
 
