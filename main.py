@@ -30,12 +30,11 @@ def main(args):
     ret_sp500 = data_manager.get_ret_sp500(start=config["data"].get("test_start", "1990-01-01"))
     
     data_manager.get_data(start=config["data"].get("train_start", "1990-01-01"), end=config["data"].get("test_end", "2024-12-31"), market_cap=config["data"].get("market_cap", 10))
-    s = data_manager.get_train_val_test(targets=["ret_1m", "ret_3m", "ret_6m"])
+    s = data_manager.get_train_val_test(targets=["ret_1m", "ret_3m", "ret_6m"], top_n_market_cap=config["data"].get("top_market_cap", None))
 
     X_train, y_train, group_train = s["train"]
     X_val, y_val, group_val = s["val"]
     X_test, y_test, group_test = s["test"]
-    print(X_train.columns)
 
     # Preprocessing pipeline
     fp_cfg = config.get("feature_pipeline", {})
@@ -64,10 +63,10 @@ def main(args):
     analyzer = RankingAnalyzer(model, ensemble, X_test, group_test, y_test)
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
 
-    group_avg, encoded_group_mean_returns_fig = analyzer.plot_mean_realized_return_by_encoded_group(_LABEL_ENCODERS.get("quintile"))
+    group_avg, encoded_group_mean_returns_fig = analyzer.plot_mean_realized_return_by_encoded_group(_LABEL_ENCODERS.get("decile"))
 
-    df_long_short_test = analyzer.t_test_long_short(percentage= .1, alternative="greater")
-    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
+    df_long_short_test = analyzer.t_test_long_short(percentage= .2, alternative="greater")
+    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .2, lag=3)
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
@@ -103,13 +102,14 @@ def main(args):
     
     strategies = config.get("strategies", ["top_1"])
     strategy_dfs = {}
+    bps = config.get("pipeline", {}).get("bps", 10)
     for strategy_name in strategies:
         print(f"Evaluating strategy: {strategy_name}")
         strategy_fn = portfolio_construction.strategies.get(strategy_name)
         if strategy_fn is None:
             raise ValueError(f"Strategy '{strategy_name}' not found in PortfolioConstruction.")
         strategy_df = strategy_fn()
-        pnl, dropdown, metrics, sp_500_ols_metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name)
+        pnl, dropdown, metrics, sp_500_ols_metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name, bps=bps)
         wandb.log({
             f"{strategy_name}_pnl": wandb.Plotly(pnl),
             f"{strategy_name}_drawdown": wandb.Plotly(dropdown)

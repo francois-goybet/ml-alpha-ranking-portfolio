@@ -34,22 +34,18 @@ class PortfolioAnalyzer:
         }), title="Risk-Free PnL")
         return fig
   
-    def pnl_custom_strategy(self, strategy_df: pd.DataFrame, strategy_name: str = "Custom Strategy"):
+    def pnl_custom_strategy(
+        self,
+        strategy_df: pd.DataFrame,
+        strategy_name: str = "Custom Strategy",
+        bps: float = 10
+    ):
         """
-        Portfolio PnL with stocks + risk-free asset.
-
-        strategy_df:
-            columns = ["yyyymm", "permno", "weight"]
-            permno = -1 means risk-free asset
-
-        df_rf:
-            columns = ["yyyymm", "rf"]
-
-        Returns:
-            tuple: (pnl figure, drawdown figure, metrics dataframe)
+        Portfolio PnL with stocks + risk-free asset + transaction costs.
         """
 
         strat = strategy_df.copy()
+        cost_rate = bps / 10000  # bps → decimal
 
         # --- 1. Merge stock returns
         data = strat.merge(
@@ -61,42 +57,54 @@ class PortfolioAnalyzer:
         rf_df = self.rf_df[["yyyymm", "rf"]].copy()
         ret_sp500 = self.ret_sp500[["yyyymm", "ret"]].copy()
 
-        # shift rf_df to align with next month's returns
         rf_df["rf_1m"] = rf_df["rf"].shift(-1)
         ret_sp500["ret_1m_sp500"] = ret_sp500["ret"].shift(-1)
 
-        # --- 2. Merge risk-free rate
+        # --- 2. merge rf
         data = data.merge(
             rf_df[["yyyymm", "rf_1m"]],
             on="yyyymm",
             how="left"
         )
 
-        # --- 3. Check missing rf
         if data["rf_1m"].isna().any():
             missing_rf = data[data["rf_1m"].isna()]["yyyymm"].unique()
             raise ValueError(f"Missing rf for dates: {missing_rf}")
 
-        # --- 4. Replace return by rf for risk-free asset
-        data["ret_1m"] = np.where(data["permno"] == -1, data["rf_1m"], data["ret_1m"])
+        # --- 3. replace rf asset return
+        data["ret_1m"] = np.where(
+            data["permno"] == -1,
+            data["rf_1m"],
+            data["ret_1m"]
+        )
 
-        # --- 5. Check missing stock returns
         if data["ret_1m"].isna().any():
-            missing = data[data["ret_1m"].isna()]
-            raise ValueError(f"Missing stock returns:\n{missing.head()}")
+            raise ValueError("Missing stock returns")
 
-        # --- 6. Compute weighted returns
-        data["weighted_ret"] = data["weight"] * data["ret_1m"]
+        # --- 4. gross returns
+        data["gross_ret"] = data["weight"] * data["ret_1m"]
 
-        # --- 7. Aggregate by date
-        port = data.groupby("yyyymm", as_index=False)["weighted_ret"].sum()
+        # --- 5. turnover (portfolio-level correct approximation)
+        data = data.sort_values(["permno", "yyyymm"])
+
+        data["prev_weight"] = data.groupby("permno")["weight"].shift(1).fillna(0)
+
+        data["turnover"] = (data["weight"] - data["prev_weight"]).abs()
+
+        data["cost"] = data["turnover"] * cost_rate
+
+        # net contribution
+        data["net_ret"] = data["gross_ret"] - data["cost"]
+
+        # --- 6. aggregate portfolio
+        port = data.groupby("yyyymm", as_index=False)["net_ret"].sum()
         port = port.sort_values("yyyymm")
 
-        # --- 8. Wealth evolution
+        # --- 7. wealth
         wealth = 1.0
         wealth_list = []
 
-        for r in port["weighted_ret"].values:
+        for r in port["net_ret"].values:
             wealth *= (1 + r)
             wealth_list.append(wealth)
 
@@ -104,36 +112,39 @@ class PortfolioAnalyzer:
 
         df = port[["yyyymm", "wealth"]]
 
-        # --- 9. Compute requested performance metrics
-        monthly_ret = port["weighted_ret"].astype(float)
-        n_months = int(monthly_ret.shape[0])
+        # --- 8. metrics
+        monthly_ret = port["net_ret"].astype(float)
+        n_months = len(monthly_ret)
 
-        mean_ret = float(monthly_ret.mean()) if n_months > 0 else np.nan
-        std_ret = float(monthly_ret.std(ddof=1)) if n_months > 1 else np.nan
+        mean_ret = monthly_ret.mean() if n_months > 0 else np.nan
+        std_ret = monthly_ret.std(ddof=1) if n_months > 1 else np.nan
 
         annualized_sharpe = np.nan
-        if n_months > 1 and std_ret and std_ret > 0:
+        if std_ret and std_ret > 0:
             annualized_sharpe = (mean_ret / std_ret) * np.sqrt(12)
 
         annualized_return = np.nan
         if n_months > 0:
-            ending_wealth = float(df["wealth"].iloc[-1])
-            annualized_return = ending_wealth ** (12 / n_months) - 1
+            ending = df["wealth"].iloc[-1]
+            annualized_return = ending ** (12 / n_months) - 1
 
         rolling_peak = df["wealth"].cummax()
-        drawdown = (df["wealth"] / rolling_peak) - 1
+        drawdown = df["wealth"] / rolling_peak - 1
+
         df_drawdown = pd.DataFrame({
             "yyyymm": df["yyyymm"],
             "drawdown": drawdown
         })
-        max_drawdown = float(drawdown.min()) if n_months > 0 else np.nan
+
+        max_drawdown = float(drawdown.min())
 
         wins = monthly_ret[monthly_ret > 0]
         losses = monthly_ret[monthly_ret < 0]
+
         avg_win = float(wins.mean()) if not wins.empty else np.nan
         avg_loss = float(losses.mean()) if not losses.empty else np.nan
 
-        # 10. OLS regression against SP500 returns
+        # --- 9. regression vs SP500
         port["yyyymm"] = port["yyyymm"].astype(int)
         ret_sp500["yyyymm"] = ret_sp500["yyyymm"].astype(int)
         rf_df["yyyymm"] = rf_df["yyyymm"].astype(int)
@@ -142,53 +153,42 @@ class PortfolioAnalyzer:
             ret_sp500[["yyyymm", "ret_1m_sp500"]],
             on="yyyymm",
             how="left"
-        )
-        merged = merged.merge(
+        ).merge(
             rf_df[["yyyymm", "rf_1m"]],
             on="yyyymm",
             how="left"
         )
 
-        # Remove excess returns
-        merged["excess_ret"] = merged["weighted_ret"] - merged["rf_1m"]
+        merged["excess_ret"] = merged["net_ret"] - merged["rf_1m"]
         merged["excess_sp500"] = merged["ret_1m_sp500"] - merged["rf_1m"]
-
+        
         merged["excess_ret"] = merged["excess_ret"].astype(float)
         merged["excess_sp500"] = merged["excess_sp500"].astype(float)
+        
+        X = sm.add_constant(merged["excess_sp500"])
+        y = merged["excess_ret"]
 
-        y = merged['excess_ret']
-        X = merged[['excess_sp500']]
-
-        # add constant (alpha)
-        X = sm.add_constant(X)
-
-        # OLS regression
         model = sm.OLS(y, X).fit()
 
-        # summary
-        results = model
-
         sp_500_ols_metrics = {
-            "alpha": results.params['const'],
-            "beta": results.params['excess_sp500'],
-            "r2": results.rsquared,
-            "adj_r2": results.rsquared_adj,
-            "alpha_tstat": results.tvalues['const'],
-            "beta_tstat": results.tvalues['excess_sp500'],
-            "alpha_pvalue": results.pvalues['const'],
-            "beta_pvalue": results.pvalues['excess_sp500'],
+            "alpha": model.params["const"],
+            "beta": model.params["excess_sp500"],
+            "r2": model.rsquared,
+            "adj_r2": model.rsquared_adj,
+            "alpha_tstat": model.tvalues["const"],
+            "beta_tstat": model.tvalues["excess_sp500"],
+            "alpha_pvalue": model.pvalues["const"],
+            "beta_pvalue": model.pvalues["excess_sp500"],
         }
-        
-        metrics_df = pd.DataFrame([
-            {
-                "annualized_sharpe_ratio": annualized_sharpe,
-                "annualized_return": annualized_return,
-                "max_drawdown": max_drawdown,
-                "AvgWin": avg_win,
-                "AvgLoss": avg_loss,
-                "Total Month": n_months,
-            }
-        ])
+
+        metrics_df = pd.DataFrame([{
+            "annualized_sharpe_ratio": annualized_sharpe,
+            "annualized_return": annualized_return,
+            "max_drawdown": max_drawdown,
+            "AvgWin": avg_win,
+            "AvgLoss": avg_loss,
+            "Total Month": n_months,
+        }])
 
         pnl_fig = plot_pnl(df, title=strategy_name + " PnL")
         drawdown_fig = plot_drawdown(df_drawdown, title=strategy_name + " Drawdown")

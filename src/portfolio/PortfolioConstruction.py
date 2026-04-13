@@ -15,7 +15,9 @@ class PortfolioConstruction:
         self.y_pred = y_pred.copy()
         self.strategies = {
             "rf_only": self.strategy_rf_only,
-            "all_top_1": self.strategy_all_top_1
+            "all_top_1": self.strategy_all_top_1,
+            "all_top_10_equal_weights": self.strategy_all_top_10_equal_weights,
+            "top_10_market_cap": self.strategy_top_10_market_cap
         }
 
     def strategy_rf_only(self) -> pd.DataFrame:
@@ -51,4 +53,64 @@ class PortfolioConstruction:
         strategy_df = pd.concat([top, rf], ignore_index=True)
         return strategy_df[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "weight"], ascending=[True, False]
+        ).reset_index(drop=True)
+
+    def strategy_all_top_10_equal_weights(self) -> pd.DataFrame:
+        """
+        For each month, select the top-10 stocks by y_pred score.
+        Assign equal weight to each stock.
+        No risk-free asset included.
+        """
+        base = self.X_test[["yyyymm", "permno"]].copy()
+        base["score"] = self.y_pred
+
+        # enlever le risk-free si jamais présent
+        base = base[base["permno"] != -1]
+
+        # sélectionner top 10 par mois
+        top10 = (
+            base.sort_values(["yyyymm", "score"], ascending=[True, False])
+                .groupby("yyyymm")
+                .head(10)
+                .copy()
+        )
+
+        # equal weight
+        top10["weight"] = 1.0 / 10.0
+
+        return top10[["yyyymm", "permno", "weight"]].sort_values(
+            ["yyyymm", "permno"]
+        ).reset_index(drop=True)
+        
+    def strategy_top_10_market_cap(self) -> pd.DataFrame:
+        """
+        For each month:
+        - Select top 10 stocks by y_pred score
+        - Assign weights proportional to market cap (market_cap_musd)
+        - Normalize weights to sum to 1 per month
+        """
+        base = self.X_test[["yyyymm", "permno", "market_cap_musd"]].copy()
+        base["score"] = self.y_pred
+
+        # remove risk-free if present
+        base = base[base["permno"] != -1]
+
+        # select top 10 per month
+        top10 = (
+            base.sort_values(["yyyymm", "score"], ascending=[True, False])
+                .groupby("yyyymm")
+                .head(10)
+                .copy()
+        )
+
+        # market cap weighting inside each month
+        def normalize_weights(df):
+            df = df.copy()
+            df["weight"] = df["market_cap_musd"] / df["market_cap_musd"].sum()
+            return df
+
+        top10 = top10.groupby("yyyymm", group_keys=False).apply(normalize_weights)
+
+        return top10[["yyyymm", "permno", "weight"]].sort_values(
+            ["yyyymm", "permno"]
         ).reset_index(drop=True)

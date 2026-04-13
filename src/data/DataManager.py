@@ -113,6 +113,7 @@ class DataManager:
         targets: list[str] = ["ret_1m", "ret_3m", "ret_6m"],
         start: str | None = None,
         end: str | None = None,
+        top_n_market_cap: int | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
         """Return (X, y, groups) for a single split with preprocessing.
 
@@ -140,13 +141,15 @@ class DataManager:
         groups : list[int]
             Number of stocks per month; ``sum(groups) == len(X)``.
         """
-        X, y, groups = self._get_raw_split(split, targets, start=start, end=end)
+        top_n_market_cap = self.data_config.get("feature_pipeline", {}).get("top_market_cap")
+        X, y, groups = self._get_raw_split(split, targets, start=start, end=end, top_n_market_cap=top_n_market_cap)
         X = self._preprocess_features(X, fit=True)
         return X, y, groups
 
     def get_train_val_test(
         self,
         targets: list[str] = ["ret_1m", "ret_3m", "ret_6m"],
+        top_n_market_cap: int | None = None,
     ) -> dict[str, tuple[pd.DataFrame, pd.DataFrame, list[int]]]:
         """Return train, val and test splits with preprocessing fit on train only.
 
@@ -159,9 +162,9 @@ class DataManager:
         dict with keys ``"train"``, ``"val"``, ``"test"``, each containing
         ``(X, y, groups)``.
         """
-        X_train, y_train, groups_train = self._get_raw_split("train", targets)
-        X_val,   y_val,   groups_val   = self._get_raw_split("val",   targets)
-        X_test,  y_test,  groups_test  = self._get_raw_split("test",  targets)
+        X_train, y_train, groups_train = self._get_raw_split("train", targets, top_n_market_cap=top_n_market_cap)
+        X_val,   y_val,   groups_val   = self._get_raw_split("val",   targets, top_n_market_cap=top_n_market_cap)
+        X_test,  y_test,  groups_test  = self._get_raw_split("test",  targets, top_n_market_cap=top_n_market_cap)
 
         # Fit preprocessing on train, apply to all splits
         X_train = self._preprocess_features(X_train, fit=True)
@@ -226,6 +229,7 @@ class DataManager:
         targets: list[str],
         start: str | None = None,
         end: str | None = None,
+        top_n_market_cap: int | None = None,
     ) -> tuple[pd.DataFrame, pd.DataFrame, list[int]]:
         """Internal version of get_split — returns raw (unpreprocessed) X."""
         if _DATASET_PARQUET.exists():
@@ -264,6 +268,16 @@ class DataManager:
 
         targets_list = [targets] if isinstance(targets, str) else list(targets)
         df = df.dropna(subset=targets_list).reset_index(drop=True)
+        
+        # keep top_n_market_cap per month if specified
+        if top_n_market_cap is not None:
+            df = (
+                df.sort_values(["yyyymm", "market_cap_musd"], ascending=[True, False])
+                .groupby("yyyymm")
+                .head(top_n_market_cap)
+                .reset_index(drop=True)
+            )
+
         X = df.copy()
         y = df[targets]
         groups = df.groupby("yyyymm").size().tolist()
