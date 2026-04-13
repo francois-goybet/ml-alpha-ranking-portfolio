@@ -1,0 +1,165 @@
+# =============================================================================
+# FULL PARAMETER REFERENCE — ml-alpha-ranking-portfolio
+# All parameters with their defaults, types, and accepted values.
+# Based on src/model/model.py
+# =============================================================================
+
+data:
+  data_path: data/raw.csv          # str — path to the raw CSV file
+  train_start: 1990-01-01          # str — start date of training period (YYYY-MM-DD)
+  train_end: 2015-12-31            # str — end date of training period
+  val_start: 2016-01-01            # str — start date of validation period
+  val_end: 2020-12-31              # str — end date of validation period
+  test_start: 2021-01-01           # str — start date of test period
+  test_end: 2024-12-31             # str — end date of test period
+  market_cap: 10                   # int/float — minimum market cap filter (in $B or units used by DataManager)
+  return_lags: [1, 2, 3, 6, 12]    # list[int] — which lagged monthly returns to include as features
+                                   #   e.g. [1, 2, 3, 6, 12] adds ret_lag1, ret_lag2, ..., ret_lag12
+                                   #   [] or omit to include no lag features
+                                   #   default: [1, 2, 3, 4, 5, 6]
+  target_aggregation: null         # str | null — how to aggregate the forward return targets
+                                   #   null    — use point-in-time return (ret.shift(-k)). Default.
+                                   #             ret_3m = return at t+3
+                                   #   "mean"  — mean of monthly returns over the window
+                                   #             ret_3m = mean(ret_{t+1}, ret_{t+2}, ret_{t+3})
+                                   #   "median"— median over the window (more robust to outliers)
+                                   #   Smooths label noise; recommended when using long_ranker or NDCG.
+
+model:
+  # --- MultiHorizonRanker ---
+  backend: xgboost                 # str — "xgboost" | "lightgbm"
+  # targets: list of return columns to train one model per horizon.
+  # Each entry must match a column produced by DataManager.get_train_val_test().
+  targets:
+    - ret_1m                       # 1-month forward return
+    - ret_3m                       # 3-month forward return
+    - ret_6m                       # 6-month forward return
+
+  # =========================================================================
+  # XGBoost parameters (used when backend: xgboost)
+  # =========================================================================
+
+  # --- Boosting ---
+  num_rounds: 100                  # int   — number of boosting rounds (trees)
+  learning_rate: 0.1               # float — step size shrinkage (eta). Range: (0, 1]
+  max_depth: 6                     # int   — maximum tree depth. Range: [1, ∞)
+  subsample: 0.8                   # float — row subsampling ratio per tree. Range: (0, 1]
+  colsample_bytree: 0.8            # float — feature subsampling ratio per tree. Range: (0, 1]
+  random_state: 42                 # int   — random seed (mapped to xgb param "seed")
+
+  # --- Ranking objective ---
+  objective: rank:pairwise         # str   — "rank:pairwise" | "rank:ndcg"
+                                   #         rank:pairwise: optimises pairwise loss (RankNet)
+                                   #         rank:ndcg:     optimises NDCG directly (LambdaMART)
+
+  # --- NDCG options (only relevant when objective: rank:ndcg) ---
+  ndcg_exp_gain: false             # bool  — use exponential gain in NDCG (2^rel - 1) vs linear (rel)
+                                   #         false = linear gain (default, avoids inflation with argsort labels)
+                                   #         true  = exponential gain (standard IR NDCG)
+
+  # --- Label encoding ---
+  # Converts continuous return values to non-negative integer relevance grades
+  # required by XGBoost/LightGBM ranking objectives.
+  label_encoder: argsort           # str | null
+                                   #   "argsort"     — per-group rank (0 = worst, n-1 = best). Default.
+                                   #   "quintile"    — per-group quintile rank 0-4
+                                   #   "decile"      — per-group decile rank 0-9
+                                   #   "binary"      — 1 if above median, 0 otherwise
+                                   #   "long_ranker" — Dual-Ranker long-leg scheme:
+                                   #                   top 10% of each month get labels top_k..1
+                                   #                   (best stock = top_k = group_size//10),
+                                   #                   all other stocks get label 0.
+                                   #                   Designed for rank:ndcg / lambdarank to focus on
+                                   #                   the top decile and zero out mid-rank noise.
+                                   #                   Use with objective: rank:ndcg (XGBoost) or
+                                   #                   lambdarank (LightGBM). For LightGBM also set
+                                   #                   label_gain to cover 0..~75 values.
+                                   #   null          — skip encoding (y must already be non-negative integers)
+
+  # --- Verbosity ---
+  verbosity: 0                     # int   — XGBoost internal verbosity. 0 = silent, 1 = warning, 2 = info, 3 = debug
+
+  # =========================================================================
+  # LightGBM parameters (used when backend: lightgbm)
+  # =========================================================================
+  # Note: subsample maps to bagging_fraction, colsample_bytree to feature_fraction.
+
+  # objective: lambdarank           # str   — "lambdarank" (default for LightGBM ranking)
+  # num_leaves: 31                  # int   — max number of leaves per tree (LightGBM-specific). Range: [2, ∞)
+  # lambdarank_truncation_level: 10 # int   — list size to truncate at for LambdaRank. Equivalent to NDCG@k
+  # label_gain: null                # list[float] | null — custom gain values per relevance grade
+                                    #   null = use LightGBM defaults: [0, 1, 3, 7, 15, 31, ...]
+                                    #   example: [0, 1, 3, 7, 15] for grades 0-4
+  # label_encoder: quintile         # str   — default for LightGBM is "quintile" (same options as XGBoost above)
+  # verbosity: -1                   # int   — LightGBM verbosity. -1 = silent, 0 = fatal, 1 = error, 2 = warning
+
+pipeline:
+  plots_dir: generated/plots       # str  — output directory for generated plots
+  rebuild_dataset: false           # bool — force recomputation of features even if cached data exists
+  verbose: false                   # bool — show per-round boosting logs during training
+
+feature_pipeline:
+  cross_sectional_rank: false      # bool — rank-normalise each feature within each month to [0, 1]
+                                   #         applied before global scaling; removes outlier effects
+  winsorize: null                  # float | null — clip each feature at [q, 1-q] quantile per month
+                                   #   e.g. 0.01 = clip at 1st and 99th percentile
+                                   #   null = no winsorisation
+  impute: median                   # str | null — NaN imputation strategy
+                                   #   "median" — fill with per-feature train median (recommended)
+                                   #   "zero"   — fill with 0
+                                   #   null     — no imputation (XGBoost handles NaNs natively)
+  scale: null                      # str | null — global feature scaling applied after CS transforms
+                                   #   "standard" — zero mean, unit variance (z-score)
+                                   #   "minmax"   — scale to [0, 1]
+                                   #   null       — no scaling (recommended if cross_sectional_rank: true)
+  drop_low_variance: 0.0           # float | null — drop features with variance <= threshold
+                                   #   0.0 = drop only constants
+                                   #   null = keep all features
+  pca: null                        # int | null — keep top-N PCA components after all other transforms
+                                   #   null = no PCA
+  centroid_feature: false          # bool — add L2 distance to the cross-sectional centroid per month
+                                   #   captures how "extreme" a stock's characteristics are relative to peers
+  ridge_features:                  # fit Ridge regression on train labels and add predictions as meta-features
+    targets: [ret_1m, ret_3m, ret_6m]  # list[str] — one Ridge model fitted per target horizon
+    alpha: 1.0                     # float — Ridge regularisation strength (higher = more shrinkage)
+
+  # ---------------------------------------------------------------------------
+  # Autoencoder feature compression (all three variants share the keys below)
+  # Runs after ridge_features and before pca.
+  # Exactly one of denoising/variational may be true; both false = plain AE.
+  # ---------------------------------------------------------------------------
+  # autoencoder:
+  #   hidden_dims: [32, 16, 8]     # list[int] — encoder layer widths; last = bottleneck (latent_dim).
+  #                                #   Decoder is the mirror in reverse.
+  #                                #   Default follows paper: input → 32 → 16 → 8
+  #   epochs: 50                   # int   — training epochs
+  #   batch_size: 512              # int   — mini-batch size
+  #   lr: 1e-3                     # float — Adam learning rate
+  #   weight_decay: 1e-5           # float — Adam L2 regularisation
+  #   dropout: 0.1                 # float — dropout probability after each hidden layer
+  #   replace_features: false      # bool  — true = return only latent cols; false = append to existing features
+  #   device: null                 # str | null — "cpu" | "mps" (Apple Silicon) | "cuda" | null → cpu
+  #
+  #   # Plain AE (default when both flags below are false):
+  #   #   Encoder: input → h1 →(ReLU)→ h2 →(ReLU)→ ... → hN (no activation at bottleneck)
+  #   #   Decoder: hN → ... → h1 → input (linear output)
+  #   #   Loss: MSE reconstruction
+  #   denoising: false             # bool  — use DenoisingTabularAutoencoder instead of plain AE
+  #   # Denoising AE adds Student-t noise to each batch during training; encoder learns robust features.
+  #   noise_scale: 0.1             # float — noise amplitude (denoising only)
+  #   noise_df: 3.0                # float — Student-t degrees of freedom (denoising only)
+  #                                #          lower → heavier tails (df=1 = Cauchy, df→∞ = Gaussian)
+  #
+  #   variational: false           # bool  — use VariationalTabularAutoencoder (VAE) instead
+  #   # VAE encoder outputs (mu, log_var); ELBO loss = MSE + beta * KL(q||N(0,I))
+  #   # At inference, the posterior mean (mu) is returned — deterministic feature vector.
+  #   beta: 1.0                    # float — KL weight (VAE only). 1 = standard VAE.
+  #                                #          beta > 1 = beta-VAE (more disentangled latent space)
+
+ensemble:
+  enabled: true                    # bool — combine per-horizon scores into a single ranking
+  combination: mean_rank           # str  — "mean_rank" (Borda count average of per-horizon ranks)
+                                   #         "mean_score" (weighted average of raw model scores)
+  weights: null                    # list[float] | null — per-horizon weights aligned with model.targets
+                                   #   null = equal weights
+                                   #   example: [0.6, 0.2, 0.2] for [ret_1m, ret_3m, ret_6m]
