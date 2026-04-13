@@ -243,7 +243,7 @@ class FeaturePipeline:
         for target in targets:
             if target not in y.columns:
                 continue
-            y_t = y[target].fillna(0).values
+            y_t = y[target].astype(float).fillna(0.0).values
             ridge = Ridge(alpha=alpha)
             ridge.fit(X_arr, y_t)
             self._ridge_models[target] = ridge

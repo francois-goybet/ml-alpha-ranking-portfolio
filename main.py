@@ -59,8 +59,78 @@ def main(args):
     model_cfg = config.get("model", {})
     targets = model_cfg.get("targets", ["ret_1m", "ret_3m", "ret_6m"])
     verbose = config.get("pipeline", {}).get("verbose", True)
-    model = MultiHorizonRanker(**model_cfg)
-    model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
+    backend = model_cfg.get("backend", "xgboost")
+
+    _NEURAL_KEYS = {
+        "hidden_dim", "encoder_layers", "ranking_head_layers", "dropout",
+        "alpha", "beta_aux", "gamma", "delta", "lambda_sigma",
+        "ranking_loss", "ndcg_tau",
+        "margin_weight", "margin",
+        "d_model", "n_heads", "n_layers",
+        "lr", "weight_decay", "max_grad_norm", "num_rounds", "batch_groups", "device",
+        "label_encoder", "random_state",
+    }
+
+    if backend == "tabular":
+        from src.model.tabular_ranker import TabularRanker
+        tab_kwargs = {k: v for k, v in model_cfg.items() if k in _NEURAL_KEYS}
+        _tab = TabularRanker(**tab_kwargs)
+        _tab.fit(X_train, y_train, group_train, verbose=True)
+
+        class _TabAdapter:
+            def __init__(self, m, tgts, grps):
+                self._m = m
+                self.targets = tgts
+                self._groups = list(grps)
+            def predict(self, X):
+                s = self._m.predict(X, self._groups)
+                return {t: s for t in self.targets}
+            def get_feature_importance(self, importance_type="gain"):
+                return {t: {} for t in self.targets}
+
+        model = _TabAdapter(_tab, targets, group_test)
+
+    elif backend == "mlp":
+        from src.model.mlp_ranker import MultiScaleMLPRanker
+        mlp_kwargs = {k: v for k, v in model_cfg.items() if k in _NEURAL_KEYS}
+        _mlp = MultiScaleMLPRanker(**mlp_kwargs)
+        _mlp.fit(X_train, y_train, group_train, verbose=True)
+
+        class _Adapter:
+            def __init__(self, m, tgts):
+                self._m = m
+                self.targets = tgts
+            def predict(self, X):
+                s = self._m.predict(X)
+                return {t: s for t in self.targets}
+            def get_feature_importance(self, importance_type="gain"):
+                return {t: {} for t in self.targets}
+
+        model = _Adapter(_mlp, targets)
+
+    elif backend == "gru":
+        from src.model.gru_ranker import GRURanker
+        gru_kwargs = {k: v for k, v in model_cfg.items() if k in _NEURAL_KEYS}
+        _gru = GRURanker(**gru_kwargs)
+        _gru.fit(X_train, y_train, group_train, verbose=True)
+
+        class _GRUAdapter:
+            """Wraps GRURanker to expose the MultiHorizonRanker dict-predict interface."""
+            def __init__(self, m, tgts):
+                self._m = m
+                self.targets = tgts
+
+            def predict(self, X):
+                s = self._m.predict(X)
+                return {t: s for t in self.targets}
+
+            def get_feature_importance(self, importance_type="gain"):
+                return {t: {} for t in self.targets}
+
+        model = _GRUAdapter(_gru, targets)
+    else:
+        model = MultiHorizonRanker(**model_cfg)
+        model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
 
     # --- Post-training evaluation on test set ---
     label_encoder_name = config.get("model", {}).get("label_encoder", "argsort")
@@ -102,14 +172,18 @@ def main(args):
                 hit_scores[k].append(precision_at_k(scores[sl], encoded[sl].astype(float), k))
             cursor += g
 
-        auc = roc_auc_score((encoded > np.median(encoded)).astype(int), scores)
+        binary_labels = (encoded > np.median(encoded)).astype(int)
+        if np.isnan(scores).any() or len(np.unique(binary_labels)) < 2:
+            auc = float("nan")
+        else:
+            auc = roc_auc_score(binary_labels, scores)
         ndcg_parts = "  ".join(f"NDCG@{k}: {np.mean(ndcg_scores[k]):.4f}" for k in eval_at)
         hit_parts = "  ".join(f"Hit@{k}: {np.mean(hit_scores[k]):.4f}" for k in eval_at)
         print(f"  [{target}]  {ndcg_parts}  {hit_parts}  AUC: {auc:.4f}")
 
     # --- Ensemble evaluation ---
     ensemble_cfg = config.get("ensemble", {})
-    if len(targets) > 1 and ensemble_cfg.get("enabled", True):
+    if backend not in ("gru", "mlp", "tabular") and len(targets) > 1 and ensemble_cfg.get("enabled", True):
         weights = ensemble_cfg.get("weights", None)
         combination = ensemble_cfg.get("combination", "mean_rank")
         ensemble = HorizonEnsemble(model, combination=combination, weights=weights)

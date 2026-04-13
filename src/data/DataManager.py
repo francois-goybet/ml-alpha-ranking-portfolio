@@ -189,7 +189,7 @@ class DataManager:
 
         # Add lagged monthly return features computed on the full dataset
         # (before date filtering) so lags at the start of each split are correct.
-        return_lags = self.data_config.get("return_lags", list(range(1, 7)))
+        return_lags = self.data_config.get("return_lags", [])
         df = df.sort_values(["permno", "yyyymm"])
         for lag in return_lags:
             df[f"ret_lag{lag}"] = df.groupby("permno")["ret"].shift(lag)

@@ -93,6 +93,108 @@ model:
   # label_encoder: quintile         # str   — default for LightGBM is "quintile" (same options as XGBoost above)
   # verbosity: -1                   # int   — LightGBM verbosity. -1 = silent, 0 = fatal, 1 = error, 2 = warning
 
+  # =========================================================================
+  # Multi-Scale MLP Ranker (backend: mlp)  ← recommended neural backend
+  # =========================================================================
+  # A single model trained simultaneously on all 3 horizon targets.
+  # Replaces MultiHorizonRanker; set backend: mlp to activate.
+  #
+  # Architecture (three PARALLEL branches from raw input):
+  #
+  #   Input (F features)
+  #     ├─ Block-1 : Linear(F,H) + LayerNorm + ReLU + Dropout → h1  → aux_1
+  #     ├─ Block-2 : Linear(F,H) + LayerNorm + ReLU + Dropout → h2  → aux_2
+  #     └─ Block-3 : Linear(F,H) + LayerNorm + ReLU + Dropout → h3  → aux_3
+  #
+  #     concat(h1, h2, h3)  →  Head: Linear(3H,H) + ReLU + Linear(H,1)  →  score
+  #
+  # Each branch specialises for its own horizon:
+  #   aux_1 → BCE  (binary: top-10% at t+1, supervised by ret_1m)
+  #   aux_2 → BCE  (binary: top-10% at t+2, supervised by ret_3m)
+  #   aux_3 → BCE  (binary: top-10% at t+3, supervised by ret_6m)
+  # BCE gradients flow only through that branch's parameters.
+  # The final head fuses all three horizon-aware representations.
+  #
+  # Loss:
+  #   α·BCE(aux1, t+1) + β·BCE(aux2, t+2) + γ·BCE(aux3, t+3) + δ·RankingLoss(score)
+  #
+  # Notes:
+  #   - An internal StandardScaler is fitted on train data inside fit(); no external
+  #     feature scaling is needed (but pipeline.feature_pipeline.scale: null is fine).
+  #   - HorizonEnsemble is skipped automatically when backend: mlp.
+  #   - feature_importance is not available for this backend (returns empty dict).
+  #   - targets list is still required in config; each entry maps to one BCE aux head.
+  #
+  # hidden_dim: 128              # int   — width H of each parallel block and the fused head
+  # dropout: 0.1                 # float — dropout rate inside each block (0 = disabled)
+  #
+  # alpha: 1.0                   # float — BCE loss weight for branch-1 aux head (t+1)
+  # beta_aux: 0.7                # float — BCE loss weight for branch-2 aux head (t+2)
+  # gamma: 0.4                   # float — BCE loss weight for branch-3 aux head (t+3)
+  # delta: 1.0                   # float — ranking loss weight for the final head
+  # lambda_sigma: 1.0            # float — σ for LambdaLoss; only used when ranking_loss: lambda
+  #
+  # ranking_loss: ndcg           # str   — "lambda" | "ndcg" | "softmax"
+  #                              #   "lambda":  pairwise logistic weighted by |ΔNDCG|, O(N²/2 pairs)
+  #                              #   "ndcg":    differentiable NDCG via NeuralSort, O(N²)
+  #                              #              directly minimises (1 − NDCG); recommended
+  #                              #   "softmax": ListNet top-1 cross-entropy, O(N), fastest
+  #                              #              p_pred=softmax(s/τ), p_true=softmax(lbl/τ), loss=−Σp_true·log(p_pred)
+  # ndcg_tau: 1.0                # float — temperature for NeuralSort ("ndcg") or ListNet ("softmax")
+  #                              #          lower → sharper distribution; too low may cause instability
+  #
+  # lr: 3e-4                     # float — Adam learning rate
+  # weight_decay: 1e-5           # float — Adam L2 regularisation
+  # num_rounds: 50               # int   — number of training epochs
+  # batch_groups: 16             # int   — monthly groups per gradient step
+  # device: cpu                  # str   — "cpu" | "cuda" | "mps"
+  # label_encoder: long_ranker   # str   — rank-label encoder (same options as XGBoost above)
+  # random_state: 42             # int   — random seed
+
+  # =========================================================================
+  # GRU Multi-Horizon Ranker (backend: gru)
+  # =========================================================================
+  # A single model trained simultaneously on all 3 horizon targets.
+  # Set backend: gru to activate.
+  #
+  # Architecture:
+  #   1. Encoder MLP   : F → hidden_dim  (initial GRU hidden state h0)
+  #   2. GRUCell unrolled 3 steps (same input x at each step):
+  #        h1 = GRU(x, h0) → aux_head_1  (binary BCE: top-10% at t+1?)
+  #        h2 = GRU(x, h1) → aux_head_2  (binary BCE: top-10% at t+2?)
+  #        h3 = GRU(x, h2) → aux_head_3  (binary BCE: top-10% at t+3?)
+  #   3. Ranking MLP   : h3 → scalar score (used at inference only)
+  #
+  # Loss:
+  #   α·BCE(aux1) + β·BCE(aux2) + γ·BCE(aux3) + δ·RankingLoss(ranking_head)
+  #   Aux BCE uses binary top-10% labels per horizon per month.
+  #
+  # Notes:
+  #   - y must be a 3-column DataFrame [ret_1m, ret_3m, ret_6m] for separate BCE targets.
+  #   - HorizonEnsemble is skipped when backend: gru (single model outputs one score).
+  #   - feature_importance is not available for this backend (returns empty dict).
+  #
+  # hidden_dim: 64               # int   — hidden size for encoder MLP and GRU cell state
+  # encoder_layers: 2            # int   — number of hidden layers in the encoder MLP
+  # ranking_head_layers: 2       # int   — number of hidden layers in the ranking score MLP
+  # dropout: 0.1                 # float — dropout rate after each hidden layer (0 = disabled)
+  #
+  # alpha: 1.0                   # float — BCE loss weight for aux head at t+1
+  # beta_aux: 0.7                # float — BCE loss weight for aux head at t+2
+  # gamma: 0.4                   # float — BCE loss weight for aux head at t+3
+  # delta: 1.0                   # float — ranking loss weight for the final head
+  # lambda_sigma: 1.0            # float — σ scaling inside LambdaLoss (ranking_loss: lambda only)
+  # ranking_loss: lambda         # str   — "lambda" | "ndcg" | "softmax"  (same semantics as mlp)
+  # ndcg_tau: 1.0                # float — temperature for "ndcg" or "softmax" (same as mlp)
+  #
+  # lr: 1e-3                     # float — Adam learning rate
+  # weight_decay: 1e-5           # float — Adam L2 regularisation
+  # num_rounds: 20               # int   — number of training epochs
+  # batch_groups: 8              # int   — monthly groups per gradient step
+  # device: cpu                  # str   — "cpu" | "cuda" | "mps"
+  # label_encoder: long_ranker   # str   — rank-label encoder (same options as XGBoost)
+  # random_state: 42             # int   — random seed
+
 pipeline:
   plots_dir: generated/plots       # str  — output directory for generated plots
   rebuild_dataset: false           # bool — force recomputation of features even if cached data exists
