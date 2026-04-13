@@ -178,8 +178,7 @@ class PortfolioAnalyzer:
             "alpha_pvalue": results.pvalues['const'],
             "beta_pvalue": results.pvalues['excess_sp500'],
         }
-
-
+        
         metrics_df = pd.DataFrame([
             {
                 "annualized_sharpe_ratio": annualized_sharpe,
