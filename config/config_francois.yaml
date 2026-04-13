@@ -31,7 +31,7 @@ pipeline:
   verbose: true          # show boosting round logs during training
   bps: 10                 # basis points for transaction cost in backtest (bps = % / 100)
 
-strategies: [rf_only, all_top_1, all_top_10_equal_weights, top_10_market_cap]
+strategies: [rf_only, all_top_1, all_top_10_equal_weights, top_10_market_cap, top_20_market_cap, top_50_market_cap, top_100_market_cap]
 
 feature_pipeline:
   cross_sectional_rank: False   # rank-normalise each feature within each month to [0, 1]

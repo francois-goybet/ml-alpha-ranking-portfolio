@@ -17,7 +17,10 @@ class PortfolioConstruction:
             "rf_only": self.strategy_rf_only,
             "all_top_1": self.strategy_all_top_1,
             "all_top_10_equal_weights": self.strategy_all_top_10_equal_weights,
-            "top_10_market_cap": self.strategy_top_10_market_cap
+            "top_10_market_cap": self.strategy_top_10_market_cap,
+            "top_20_market_cap": lambda: self.strategy_top_N_market_cap(N=20),
+            "top_50_market_cap": lambda: self.strategy_top_N_market_cap(N=50),
+            "top_100_market_cap": lambda: self.strategy_top_N_market_cap(N=100),
         }
 
     def strategy_rf_only(self) -> pd.DataFrame:
@@ -112,5 +115,39 @@ class PortfolioConstruction:
         top10 = top10.groupby("yyyymm", group_keys=False).apply(normalize_weights)
 
         return top10[["yyyymm", "permno", "weight"]].sort_values(
+            ["yyyymm", "permno"]
+        ).reset_index(drop=True)
+    
+    def strategy_top_N_market_cap(self, N: int = 10) -> pd.DataFrame:
+        """
+        For each month:
+        - Select top N stocks by y_pred score
+        - Assign weights proportional to market cap
+        - Normalize weights to sum to 1 per month
+        """
+
+        base = self.X_test[["yyyymm", "permno", "market_cap_musd"]].copy()
+        base["score"] = self.y_pred
+
+        # remove risk-free
+        base = base[base["permno"] != -1]
+
+        # select top N per month
+        topN = (
+            base.sort_values(["yyyymm", "score"], ascending=[True, False])
+                .groupby("yyyymm")
+                .head(N)
+                .copy()
+        )
+
+        # market cap weighting per month
+        def normalize_weights(df):
+            df = df.copy()
+            df["weight"] = df["market_cap_musd"] / df["market_cap_musd"].sum()
+            return df
+
+        topN = topN.groupby("yyyymm", group_keys=False).apply(normalize_weights)
+
+        return topN[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "permno"]
         ).reset_index(drop=True)
