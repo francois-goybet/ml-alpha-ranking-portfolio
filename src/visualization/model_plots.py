@@ -101,3 +101,23 @@ def plot_feature_importance(importance, target):
     )
 
     return fig
+
+
+def plot_encoded_group_mean_returns(df_group_returns: pd.DataFrame, title: str = "Mean Realized Return by Encoded Group"):
+    fig = px.bar(
+        df_group_returns,
+        x="encoded_group",
+        y="mean_realized_return",
+        title=title,
+        labels={
+            "encoded_group": "Encoded group",
+            "mean_realized_return": "Average monthly mean realized return",
+        },
+    )
+
+    fig.update_layout(
+        height=500,
+        xaxis_type="category",
+    )
+
+    return fig

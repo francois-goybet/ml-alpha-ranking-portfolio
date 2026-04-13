@@ -14,6 +14,7 @@ _CONSTRUCTION_DIR = _DATA_DIR / "construction"
 _DATASET_PARQUET = _DATA_DIR / "dataset.parquet"
 _SIGNAL_DOC_PARQUET = _DATA_DIR / "signal_doc.parquet"
 _RF_PARQUET = _DATA_DIR / "rf.parquet"
+_RET_SP500_PARQUET = _DATA_DIR / "ret_sp500.parquet"
 _CHUNK_SIZE = 20
 _META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
 
@@ -194,6 +195,25 @@ class DataManager:
         # convert rf from % to decimal
         df["rf"] = df["rf"] / 100.0
         df.to_parquet(_RF_PARQUET, index=False)
+        return df
+
+    def get_ret_sp500(self, start):
+
+        if _RET_SP500_PARQUET.exists():
+            return pd.read_parquet(_RET_SP500_PARQUET)
+        
+        db = wrds.Connection()
+
+        df = db.raw_sql(f"""
+            SELECT date, sprtrn
+            FROM crsp.msi
+            where date >= '{start}'
+        """)
+
+        df['yyyymm'] = pd.to_datetime(df['date']).dt.strftime('%Y%m')
+
+        df = df[['yyyymm', 'sprtrn']].rename(columns={'sprtrn': 'ret'})
+        df.to_parquet(_RET_SP500_PARQUET, index=False)
         return df
 
     # ------------------------------------------------------------------

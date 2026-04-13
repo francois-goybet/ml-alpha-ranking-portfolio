@@ -14,7 +14,7 @@ from src.portfolio.PortfolioConstruction import PortfolioConstruction
 import wandb
 
 def main(args):
-
+    
     # Load configuration with lightweight parsing.
     config = load_config(args.config)
 
@@ -27,6 +27,8 @@ def main(args):
 
     # Data loading and splitting
     data_manager = DataManager(config.get("data", {}))
+    ret_sp500 = data_manager.get_ret_sp500(start=config["data"].get("test_start", "1990-01-01"))
+    
     data_manager.get_data(start=config["data"].get("train_start", "1990-01-01"), end=config["data"].get("test_end", "2024-12-31"), market_cap=config["data"].get("market_cap", 10))
     s = data_manager.get_train_val_test(targets=["ret_1m", "ret_3m", "ret_6m"])
 
@@ -61,37 +63,14 @@ def main(args):
 
     analyzer = RankingAnalyzer(model, ensemble, X_test, group_test, y_test)
     df_metrics = analyzer.evaluate(eval_at=eval_at, encoder_fn=encoder_fn)
+
+    group_avg, encoded_group_mean_returns_fig = analyzer.plot_mean_realized_return_by_encoded_group(_LABEL_ENCODERS.get("quintile"))
+
     df_long_short_test = analyzer.t_test_long_short(percentage= .1, alternative="greater")
     df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
-
-    # Strategies
-    rf_df = data_manager.get_rf(start=config["data"].get("test_start", "1990-01-01"))
-    
-    portfolio_construction = PortfolioConstruction(rf_df, X_test, y_test, ensemble.predict(X_test, group_test))
-    portfolio_analyzer = PortfolioAnalyzer(rf_df, X_test, y_test)
-    
-    strategies = config.get("strategies", ["top_1"])
-    strategy_dfs = {}
-    for strategy_name in strategies:
-        print(f"Evaluating strategy: {strategy_name}")
-        strategy_fn = portfolio_construction.strategies.get(strategy_name)
-        if strategy_fn is None:
-            raise ValueError(f"Strategy '{strategy_name}' not found in PortfolioConstruction.")
-        strategy_df = strategy_fn()
-        pnl, dropdown, metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name)
-        wandb.log({
-            f"{strategy_name}_pnl": wandb.Plotly(pnl),
-            f"{strategy_name}_drawdown": wandb.Plotly(dropdown)
-        })
-        wandb_table_metrics = wandb.Table(dataframe=metrics)
-        wandb.log({f"{strategy_name}_metrics": wandb_table_metrics})
-        wandb_table_strategy = wandb.Table(dataframe=strategy_df)
-        wandb.log({f"{strategy_name}_weights": wandb_table_strategy})  
-
-    # Saving results to Weights & Biases
 
     for target, fig in features_importance_figs.items():
         wandb.log({
@@ -107,6 +86,43 @@ def main(args):
     wandb.log({"test_metrics": wandb_table})
     wandb_table_long_short = wandb.Table(dataframe=df_long_short_test)
     wandb.log({"df_long_short_test": wandb_table_long_short})
+    wandb_table_group_returns = wandb.Table(dataframe=group_avg)
+    wandb.log({"group_returns": wandb_table_group_returns})
+    wandb.log({"encoded_group_mean_returns_fig": wandb.Plotly(encoded_group_mean_returns_fig) })
+
+    # Strategies
+    rf_df = data_manager.get_rf(start=config["data"].get("test_start", "1990-01-01"))
+    ret_sp500 = data_manager.get_ret_sp500(start=config["data"].get("test_start", "1990-01-01"))
+    y_pred = ensemble.predict(X_test, group_test)
+
+    X_test.to_csv("generated/X_test.csv", index=False)
+    pd.DataFrame(y_pred).to_csv("generated/y_pred.csv", index=False)
+
+    portfolio_construction = PortfolioConstruction(rf_df, X_test, y_test, y_pred)
+    portfolio_analyzer = PortfolioAnalyzer(rf_df, ret_sp500, X_test, y_test)
+    
+    strategies = config.get("strategies", ["top_1"])
+    strategy_dfs = {}
+    for strategy_name in strategies:
+        print(f"Evaluating strategy: {strategy_name}")
+        strategy_fn = portfolio_construction.strategies.get(strategy_name)
+        if strategy_fn is None:
+            raise ValueError(f"Strategy '{strategy_name}' not found in PortfolioConstruction.")
+        strategy_df = strategy_fn()
+        pnl, dropdown, metrics, sp_500_ols_metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name)
+        wandb.log({
+            f"{strategy_name}_pnl": wandb.Plotly(pnl),
+            f"{strategy_name}_drawdown": wandb.Plotly(dropdown)
+        })
+        wandb_table_metrics = wandb.Table(dataframe=metrics)
+        wandb.log({f"{strategy_name}_metrics": wandb_table_metrics})
+        wandb_table_strategy = wandb.Table(dataframe=strategy_df)
+        wandb.log({f"{strategy_name}_weights": wandb_table_strategy})
+        wandb_table_sp500_ols_metrics = wandb.Table(dataframe=pd.DataFrame([sp_500_ols_metrics]))
+        wandb.log({f"{strategy_name}_sp500_ols_metrics": wandb_table_sp500_ols_metrics})
+
+    # Saving results to Weights & Biases
+
 
     wandb.finish()
 

@@ -6,7 +6,11 @@ from src.model.model import MultiHorizonRanker, HorizonEnsemble
 from sklearn.metrics import roc_auc_score
 import statsmodels.api as sm
 
-from src.visualization.model_plots import plot_feature_importance, plot_history
+from src.visualization.model_plots import (
+    plot_encoded_group_mean_returns,
+    plot_feature_importance,
+    plot_history,
+)
 
 """RankingAnalyzer for evaluating multi-horizon ranking models."""
 
@@ -155,6 +159,45 @@ class RankingAnalyzer:
             fig = plot_feature_importance((x,y), target)
             figs[target] = fig
         return figs
+
+    def plot_mean_realized_return_by_encoded_group(
+        self,
+        encoder_fn: callable,
+    ):
+        """
+        Build a bar plot where:
+        - x-axis: encoded group (from encoder_fn applied to ensemble predictions)
+        - y-axis: mean over months of each month's mean realized return within group
+        """
+
+        y_pred = self.ensemble.predict(self.X_test, groups=list(self.group_test))
+
+        encoded_pred = encoder_fn(pd.Series(y_pred), list(self.group_test))
+        realized_ret = self.y_test.iloc[:, 0].to_numpy()
+
+        df = pd.DataFrame(
+            {
+                "yyyymm": self.X_test["yyyymm"].to_numpy(),
+                "encoded_group": encoded_pred,
+                "realized_return": realized_ret,
+            }
+        )
+
+        monthly_group_means = (
+            df.groupby(["yyyymm", "encoded_group"], as_index=False)["realized_return"]
+            .mean()
+            .rename(columns={"realized_return": "monthly_mean_realized_return"})
+        )
+
+        group_avg = (
+            monthly_group_means.groupby("encoded_group", as_index=False)["monthly_mean_realized_return"]
+            .mean()
+            .rename(columns={"monthly_mean_realized_return": "mean_realized_return"})
+            .sort_values("encoded_group")
+        )
+
+        fig = plot_encoded_group_mean_returns(group_avg)
+        return group_avg, fig
 
     def t_test_long_short(
         self,

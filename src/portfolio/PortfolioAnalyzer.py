@@ -2,18 +2,20 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from src.visualization.portfolio_plots import plot_pnl, plot_drawdown
-
+import statsmodels.api as sm
 
 class PortfolioAnalyzer:
 
     def __init__(
         self,
         rf_df: pd.DataFrame,
+        ret_sp500: pd.DataFrame,
         X_test: pd.DataFrame,
         y_test: pd.DataFrame,
         date_col: str = "yyyymm"
     ):
         self.rf_df = rf_df.copy()
+        self.ret_sp500 = ret_sp500.copy()
         self.X_test = X_test.copy()
         self.y_test = y_test.copy()
         self.date_col = date_col
@@ -51,33 +53,40 @@ class PortfolioAnalyzer:
 
         # --- 1. Merge stock returns
         data = strat.merge(
-            self.X_test[["yyyymm", "permno", "ret"]],
+            self.X_test[["yyyymm", "permno", "ret_1m"]],
             on=["yyyymm", "permno"],
             how="left"
         )
 
+        rf_df = self.rf_df[["yyyymm", "rf"]].copy()
+        ret_sp500 = self.ret_sp500[["yyyymm", "ret"]].copy()
+
+        # shift rf_df to align with next month's returns
+        rf_df["rf_1m"] = rf_df["rf"].shift(-1)
+        ret_sp500["ret_1m_sp500"] = ret_sp500["ret"].shift(-1)
+
         # --- 2. Merge risk-free rate
         data = data.merge(
-            self.rf_df[["yyyymm", "rf"]],
+            rf_df[["yyyymm", "rf_1m"]],
             on="yyyymm",
             how="left"
         )
 
         # --- 3. Check missing rf
-        if data["rf"].isna().any():
-            missing_rf = data[data["rf"].isna()]["yyyymm"].unique()
+        if data["rf_1m"].isna().any():
+            missing_rf = data[data["rf_1m"].isna()]["yyyymm"].unique()
             raise ValueError(f"Missing rf for dates: {missing_rf}")
 
         # --- 4. Replace return by rf for risk-free asset
-        data["ret"] = np.where(data["permno"] == -1, data["rf"], data["ret"])
+        data["ret_1m"] = np.where(data["permno"] == -1, data["rf_1m"], data["ret_1m"])
 
         # --- 5. Check missing stock returns
-        if data["ret"].isna().any():
-            missing = data[data["ret"].isna()]
+        if data["ret_1m"].isna().any():
+            missing = data[data["ret_1m"].isna()]
             raise ValueError(f"Missing stock returns:\n{missing.head()}")
 
         # --- 6. Compute weighted returns
-        data["weighted_ret"] = data["weight"] * data["ret"]
+        data["weighted_ret"] = data["weight"] * data["ret_1m"]
 
         # --- 7. Aggregate by date
         port = data.groupby("yyyymm", as_index=False)["weighted_ret"].sum()
@@ -124,6 +133,53 @@ class PortfolioAnalyzer:
         avg_win = float(wins.mean()) if not wins.empty else np.nan
         avg_loss = float(losses.mean()) if not losses.empty else np.nan
 
+        # 10. OLS regression against SP500 returns
+        port["yyyymm"] = port["yyyymm"].astype(int)
+        ret_sp500["yyyymm"] = ret_sp500["yyyymm"].astype(int)
+        rf_df["yyyymm"] = rf_df["yyyymm"].astype(int)
+
+        merged = port.merge(
+            ret_sp500[["yyyymm", "ret_1m_sp500"]],
+            on="yyyymm",
+            how="left"
+        )
+        merged = merged.merge(
+            rf_df[["yyyymm", "rf_1m"]],
+            on="yyyymm",
+            how="left"
+        )
+
+        # Remove excess returns
+        merged["excess_ret"] = merged["weighted_ret"] - merged["rf_1m"]
+        merged["excess_sp500"] = merged["ret_1m_sp500"] - merged["rf_1m"]
+
+        merged["excess_ret"] = merged["excess_ret"].astype(float)
+        merged["excess_sp500"] = merged["excess_sp500"].astype(float)
+
+        y = merged['excess_ret']
+        X = merged[['excess_sp500']]
+
+        # add constant (alpha)
+        X = sm.add_constant(X)
+
+        # OLS regression
+        model = sm.OLS(y, X).fit()
+
+        # summary
+        results = model
+
+        sp_500_ols_metrics = {
+            "alpha": results.params['const'],
+            "beta": results.params['excess_sp500'],
+            "r2": results.rsquared,
+            "adj_r2": results.rsquared_adj,
+            "alpha_tstat": results.tvalues['const'],
+            "beta_tstat": results.tvalues['excess_sp500'],
+            "alpha_pvalue": results.pvalues['const'],
+            "beta_pvalue": results.pvalues['excess_sp500'],
+        }
+
+
         metrics_df = pd.DataFrame([
             {
                 "annualized_sharpe_ratio": annualized_sharpe,
@@ -138,4 +194,4 @@ class PortfolioAnalyzer:
         pnl_fig = plot_pnl(df, title=strategy_name + " PnL")
         drawdown_fig = plot_drawdown(df_drawdown, title=strategy_name + " Drawdown")
 
-        return pnl_fig, drawdown_fig, metrics_df
+        return pnl_fig, drawdown_fig, metrics_df, sp_500_ols_metrics
