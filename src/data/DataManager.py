@@ -278,7 +278,7 @@ class DataManager:
         df = df.dropna(subset=targets_list).reset_index(drop=True)
         
         # keep top_n_market_cap per month if specified
-        if top_n_market_cap is not None and "market_cap_musd" in df.columns:
+        if top_n_market_cap is not None:
             df = (
                 df.sort_values(["yyyymm", "market_cap_musd"], ascending=[True, False])
                 .groupby("yyyymm")

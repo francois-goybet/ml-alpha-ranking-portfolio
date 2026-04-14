@@ -14,6 +14,7 @@ from src.portfolio.PortfolioConstruction import PortfolioConstruction
 import wandb
 import os
 os.makedirs("generated", exist_ok=True)
+os.makedirs("data", exist_ok=True)
 
 def main(args):
     
