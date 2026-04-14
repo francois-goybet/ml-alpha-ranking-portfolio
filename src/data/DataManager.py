@@ -273,7 +273,7 @@ class DataManager:
         )
 
         feature_cols = [c for c in df.columns if c not in _META]
-
+        
         targets_list = [targets] if isinstance(targets, str) else list(targets)
         df = df.dropna(subset=targets_list).reset_index(drop=True)
         

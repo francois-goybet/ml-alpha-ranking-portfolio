@@ -24,6 +24,7 @@ def main(args):
     # Initialize Weights & Biases for experiment tracking.
     wandb.init(
         project="ml-alpha-ranking",
+        name=config.get("pipeline", {}).get("experiment_name", None),
         # name="1000 boosting rounds, no CS rank, no winsorization, median imputation, no scaling, no PCA, no centroid, Ridge on all features",
         config=config  # ton config
     )
@@ -39,6 +40,11 @@ def main(args):
     X_val, y_val, group_val = s["val"]
     X_test, y_test, group_test = s["test"]
 
+    X_train = X_train.drop(columns=["Size"])  # remove targets from train features
+    X_val = X_val.drop(columns=["Size"])      # remove targets from val features
+    X_test = X_test.drop(columns=["Size"])  # remove targets from test features
+
+
     # Preprocessing pipeline
     fp_cfg = config.get("feature_pipeline", {})
     feat_pipeline = FeaturePipeline(fp_cfg)
@@ -50,6 +56,7 @@ def main(args):
     verbose = config.get("pipeline", {}).get("verbose", True)
     
     model = MultiHorizonRanker(**model_cfg)
+
     model.fit(X_train, y_train, group_train, (X_val, y_val), group_val, verbose=verbose)
     
     # HorizonEnsemble
@@ -68,8 +75,8 @@ def main(args):
 
     group_avg, encoded_group_mean_returns_fig = analyzer.plot_mean_realized_return_by_encoded_group(_LABEL_ENCODERS.get("decile"))
 
-    df_long_short_test = analyzer.t_test_long_short(percentage= .3, alternative="greater")
-    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .3, lag=3)
+    df_long_short_test = analyzer.t_test_long_short(percentage= .1, alternative="greater")
+    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
