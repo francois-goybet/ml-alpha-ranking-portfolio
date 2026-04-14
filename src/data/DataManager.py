@@ -239,6 +239,14 @@ class DataManager:
                 "dataset.parquet not found. Call get_data() first."
             )
 
+        # Add sector mapping if not already present in the dataset.
+        if "sector" not in df.columns:
+            print("  [DataManager] 'sector' column missing — fetching from WRDS …")
+            df = self._get_sector_mapping(df)
+            # Persist so we only do this once.
+            df.to_parquet(_DATASET_PARQUET, index=False)
+            print("  [DataManager] Sector mapping saved to dataset.parquet.")
+
         # Add lagged monthly return features computed on the full dataset
         # (before date filtering) so lags at the start of each split are correct.
         return_lags = self.data_config.get("return_lags", list(range(1, 7)))
@@ -497,7 +505,8 @@ class DataManager:
         def sic_to_sector(sic):
             if pd.isna(sic):
                 return "Unknown"
-            elif 1000 <= sic < 1500:
+            sic = int(sic)
+            if 1000 <= sic < 1500:
                 return "Energy"
             elif 1500 <= sic < 3000:
                 return "Industrials"
@@ -516,12 +525,13 @@ class DataManager:
             else:
                 return "Other"
 
-        df["sector"] = df["sic"].astype(int).apply(sic_to_sector)
+        df["sector"] = df["sic"].apply(sic_to_sector)
 
         # =========================
         # FINAL OUTPUT (optional mapping)
         # =========================
         df.drop(columns=["linkdt", "linkenddt", "sic", "date"], inplace=True)
+        df = df.drop_duplicates(subset=["permno", "yyyymm"])
         cols = df.columns.tolist()
         cols.insert(3, cols.pop(cols.index("sector")))
         df = df[cols]
