@@ -118,7 +118,8 @@ class FeaturePipeline:
         features = self._add_centroid_feature(features, groups)
         features = self._drop_low_variance(features, fit=True)
         features = self._impute(features, fit=True)
-        features = self._scale(features, X["sector"], fit=True)
+        sector = meta["sector"] if "sector" in meta.columns else None
+        features = self._scale(features, sector, fit=True)
         features = self._fit_ridge(features, y)
         # features = self._fit_autoencoder(features)
         features = self._apply_pca(features, fit=True)
@@ -155,7 +156,8 @@ class FeaturePipeline:
         features = self._add_centroid_feature(features, groups=None)
         features = self._select_cols(features)
         features = self._impute(features, fit=False)
-        features = self._scale(features, X["sector"], fit=False)
+        sector = meta["sector"] if "sector" in meta.columns else None
+        features = self._scale(features, sector, fit=False)
         features = self._apply_ridge(features)
         # features = self._apply_autoencoder(features)
         features = self._apply_pca(features, fit=False)
@@ -243,7 +245,7 @@ class FeaturePipeline:
             return X.fillna(self._impute_values)
         raise ValueError(f"Unknown impute strategy '{strategy}'. Use 'median', 'zero', or null.")
 
-    def _scale(self, X: pd.DataFrame, sector: pd.Series, fit: bool) -> pd.DataFrame:
+    def _scale(self, X: pd.DataFrame, sector: pd.Series | None, fit: bool) -> pd.DataFrame:
         strategy = self.cfg.get("scale", None)
         if strategy is None:
             return X
@@ -270,6 +272,12 @@ class FeaturePipeline:
             return X
 
         if strategy in ["standard_sector", "minmax_sector"]:
+            if sector is None:
+                raise ValueError(
+                    f"Scaling strategy '{strategy}' requires a 'sector' column, "
+                    "but it is not present in the dataset. Either add sector data "
+                    "(see DataManager._get_sector_mapping) or use 'standard'/'minmax' instead."
+                )
             X_scaled = X.copy()
 
             if fit:
