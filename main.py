@@ -65,8 +65,8 @@ def main(args):
 
     group_avg, encoded_group_mean_returns_fig = analyzer.plot_mean_realized_return_by_encoded_group(_LABEL_ENCODERS.get("decile"))
 
-    df_long_short_test = analyzer.t_test_long_short(percentage= .2, alternative="greater")
-    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .2, lag=3)
+    df_long_short_test = analyzer.t_test_long_short(percentage= .3, alternative="greater")
+    df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .3, lag=3)
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
