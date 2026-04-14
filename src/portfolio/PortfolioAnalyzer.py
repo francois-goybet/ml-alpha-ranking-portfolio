@@ -20,6 +20,7 @@ class PortfolioAnalyzer:
         self.y_test = y_test.copy()
         self.date_col = date_col
 
+        self.all_strategy_data = {}
         self.start = self.X_test[self.date_col].min()
         print("PortfolioAnalyzer initialized.")
         print(self.start)
@@ -190,7 +191,15 @@ class PortfolioAnalyzer:
             "Total Month": n_months,
         }])
 
+        self.all_strategy_data[strategy_name] = {
+            "pnl": df,
+            "drawdown": df_drawdown,
+            "metrics": metrics_df,
+            "sp500_ols_metrics": sp_500_ols_metrics
+        }   
+
         pnl_fig = plot_pnl(df, title=strategy_name + " PnL")
         drawdown_fig = plot_drawdown(df_drawdown, title=strategy_name + " Drawdown")
 
         return pnl_fig, drawdown_fig, metrics_df, sp_500_ols_metrics
+    

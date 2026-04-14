@@ -40,9 +40,9 @@ def main(args):
     X_val, y_val, group_val = s["val"]
     X_test, y_test, group_test = s["test"]
 
-    X_train = X_train.drop(columns=["Size"])  # remove targets from train features
-    X_val = X_val.drop(columns=["Size"])      # remove targets from val features
-    X_test = X_test.drop(columns=["Size"])  # remove targets from test features
+    # X_train = X_train.drop(columns=["Size"])  # remove targets from train features
+    # X_val = X_val.drop(columns=["Size"])      # remove targets from val features
+    # X_test = X_test.drop(columns=["Size"])  # remove targets from test features
 
 
     # Preprocessing pipeline
@@ -80,6 +80,10 @@ def main(args):
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
     history, figs = analyzer.get_history_figures()
+    # saving features importance as pickle
+    features_importance = analyzer.model.get_feature_importance()
+    pd.to_pickle(features_importance, "generated/features_importance.pkl")
+    pd.to_pickle(group_avg, "generated/group_avg.pkl")
 
     for target, fig in features_importance_figs.items():
         wandb.log({
@@ -131,6 +135,10 @@ def main(args):
         wandb_table_sp500_ols_metrics = wandb.Table(dataframe=pd.DataFrame([sp_500_ols_metrics]))
         wandb.log({f"{strategy_name}_sp500_ols_metrics": wandb_table_sp500_ols_metrics})
 
+    # Saving this dict to analyze later which strategy had which weights and performance
+    all_strategy_data = portfolio_analyzer.all_strategy_data
+    pd.to_pickle(all_strategy_data, "generated/all_strategy_data.pkl")
+    
     # Saving results to Weights & Biases
 
 
