@@ -1,0 +1,63 @@
+data:
+  # You can add more configuration fields here if you need more specific behavior.
+  train_start: 1990-01-01
+  train_end: 2015-12-31
+  val_start: 2016-03-01
+  val_end: 2018-12-31
+  test_start: 2019-03-01
+  test_end: 2024-12-31
+  market_cap: 10
+  return_lags: [1, 2, 3, 6]  # lagged monthly return features to add as predictors
+  top_market_cap: 500       # keep top-500 by market cap per month; null = all
+
+model:
+  backend: ensemble
+  targets: [ret_1m, ret_3m, ret_6m]
+  label_encoder: argsort
+  objective: rank:ndcg
+  num_rounds: 10
+  learning_rate: 0.1
+  max_depth: 5
+  subsample: 0.6
+  colsample_bytree: 0.6
+  random_state: 98
+  eval_at: [20, 30, 50]
+  verbosity: 0
+
+
+pipeline:
+  plots_dir: generated/plots
+  rebuild_dataset: false
+  verbose: true          # show boosting round logs during training
+  bps: 10                 # basis points for transaction cost in backtest (bps = % / 100)
+  experiment_name: 'ensemble test1'
+
+strategies: [rf_only, all_top_1, all_top_10_equal_weights, top_10_market_cap, top_20_market_cap, top_50_market_cap, top_100_market_cap]
+
+feature_pipeline:
+  cross_sectional_rank: False   # rank-normalise each feature within each month to [0, 1]
+  winsorize: 0.1      # clip at 1st/99th percentile per month
+  impute: median               # fill NaNs with per-feature train median
+  scale: standard       # standardize features within each sector
+  drop_low_variance: 0.0       # drop constant features
+  pca: null                    # no PCA
+  centroid_feature: False       # add L2 distance to monthly centroid as a feature
+  ridge_features:
+    targets: [ret_1m, ret_3m, ret_6m]
+    alpha: 1          # Ridge regularisation strength
+  autoencoder:
+    hidden_dims: [32, 16, 8]
+    variational: true
+    beta: 1.0          # or e.g. 4.0 for beta-VAE
+    epochs: 50
+    batch_size: 512
+    lr: 1e-3
+    weight_decay: 1e-5
+    dropout: 0.1
+    replace_features: False      # true → keep only latent cols; false → append
+    device: "mps"                # "mps" for Apple Silicon
+
+ensemble:
+  enabled: true
+  combination: mean_rank   # "mean_rank" (Borda count) or "mean_score"
+  weights: [1, 0, 0] # ret_1m, ret_3m, ret_6m — null for equal weights
