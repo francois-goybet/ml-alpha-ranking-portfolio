@@ -11,7 +11,7 @@ data:
   top_market_cap: 500       # keep top-500 by market cap per month; null = all
 
 model:
-  backend: xgboost
+  backend: ensemble
   targets: [ret_1m, ret_3m, ret_6m]
   label_encoder: argsort
   objective: rank:ndcg
@@ -30,7 +30,7 @@ pipeline:
   rebuild_dataset: false
   verbose: true          # show boosting round logs during training
   bps: 10                 # basis points for transaction cost in backtest (bps = % / 100)
-  experiment_name: null
+  experiment_name: 'ensemble test1'
 
 strategies: [rf_only, all_top_1, all_top_10_equal_weights, top_10_market_cap, top_20_market_cap, top_50_market_cap, top_100_market_cap]
 
