@@ -30,7 +30,7 @@ def main(args):
 
     # Data loading and splitting
     data_manager = DataManager(config.get("data", {}))
-    ret_sp500 = data_manager.get_ret_sp500(start=config["data"].get("test_start", "1990-01-01"))
+    ret_sp500 = data_manager.get_ret_sp500(start=config["data"].get("train_start", "1990-01-01"))
     
     data_manager.get_data(start=config["data"].get("train_start", "1990-01-01"), end=config["data"].get("test_end", "2024-12-31"), market_cap=config["data"].get("market_cap", 10))
     s = data_manager.get_train_val_test(targets=["ret_1m", "ret_3m", "ret_6m"], top_n_market_cap=config["data"].get("top_market_cap", None))
