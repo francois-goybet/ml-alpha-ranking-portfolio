@@ -1,0 +1,218 @@
+# ============================================================================
+#  config.yaml — RL Monthly Portfolio Optimization Pipeline
+# ============================================================================
+#  This file is the single source of truth for every tunable knob in the
+#  pipeline: data paths, feature columns, environment parameters, network
+#  architecture, and training schedule.
+# ============================================================================
+
+# ---------------------------------------------------------------------------
+#  1. PATHS & DATA
+# ---------------------------------------------------------------------------
+#  These paths align with the ranking pipeline's DataManager output.
+#  The main dataset, SP500 returns, and risk-free rate are produced by
+#  DataManager.get_data(), get_ret_sp500(), and get_rf() respectively.
+#  If running standalone (without the ranking pipeline), use the
+#  convert_parquet_to_qlib.py script to produce the Qlib binary store.
+paths:
+  # ── Shared with ranking pipeline ──────────────────────────────────
+  raw_parquet:        "data/dataset.parquet"       # DataManager.get_data() output
+  sp500_parquet:      "data/ret_sp500.parquet"     # DataManager.get_ret_sp500()
+  riskfree_parquet:   "data/rf.parquet"            # DataManager.get_rf()
+  delisting_parquet:  "data/delisting_returns.parquet"  # prepare_delisting_returns.py
+
+  # ── Qlib binary (optional, for future Qlib-native experiments) ────
+  qlib_dir:           "~/.qlib/qlib_data/wrds_monthly"
+
+  # ── RL pipeline outputs ───────────────────────────────────────────
+  model_dir:          "artifacts/models"
+  log_dir:            "artifacts/logs"
+
+# ---------------------------------------------------------------------------
+#  2. QLIB INITIALISATION
+# ---------------------------------------------------------------------------
+qlib_init:
+  provider_uri:       "~/.qlib/qlib_data/wrds_monthly"
+  region:             "us"                    # irrelevant for custom data
+  freq:               "month"
+
+# ---------------------------------------------------------------------------
+#  3. FEATURE SPECIFICATION
+# ---------------------------------------------------------------------------
+features:
+  # ── State features (all cross-sectionally z-scored) ───────────────
+  base_features:
+    # Cost / liquidity constraints
+    - "DolVol"              # log dollar volume  (liquidity)
+    - "BidAskSpread"        # quoted spread       (friction)
+    - "RealizedVol"         # stock-level vol     (impact cost)
+    # Macro regime
+    - "VolMkt"              # market-wide vol
+    - "TrendFactor"         # macro trend
+    # Style exposures
+    - "Size"                # market cap factor
+    - "BM"                  # book-to-market
+    - "Mom12m"              # 12-month momentum
+
+  # Upstream alpha signals — prepended when present
+  optional_alpha:       "xgboost_rank_oos"
+  # optional_meta:        "xgboost_val_ndcg"    # model confidence
+
+  # Additional columns needed by the env but NOT fed as state features
+  return_col:           "ret"
+  mcap_col:             "market_cap_musd"
+
+  # Benchmark ticker injected during conversion
+  benchmark_ticker:     "INDEX_SP500"
+
+# ---------------------------------------------------------------------------
+#  4. xgboost_rank_oos — upstream alpha signal from ranking pipeline
+# ---------------------------------------------------------------------------
+#  This signal is produced by the ranking pipeline (main.py → HorizonEnsemble).
+#  Run export_alpha_signal.py after the ranking pipeline finishes to convert
+#  its predictions into the format expected here.
+#
+#  Expected format:
+#      permno              (int)   — CRSP permanent number
+#      yyyymm              (int)   — year-month identifier, e.g. 199605
+#      xgboost_rank_oos    (float) — cross-sectional rank score ∈ [0, 1]
+#
+#  NOTE: The ranking pipeline's main.py currently only predicts on the TEST
+#  set.  For full-range RL training you should run the ranker in walk-forward
+#  mode across train+val+test.  The RL pipeline gracefully degrades to 3
+#  features (DolVol, BidAskSpread, VolMkt) for any months missing the alpha.
+alpha_signal:
+  path:                 "data/xgboost_rank_oos.parquet"
+  col_name:             "xgboost_rank_oos"
+
+# ---------------------------------------------------------------------------
+#  5. DATE RANGES
+# ---------------------------------------------------------------------------
+dates:
+  # Full extent of the underlying data (used by the conversion script)
+  data_start:           "1990-01"
+  data_end:             "2024-12"
+
+  # Default training window for episode sampling
+  train_start:          "1995-01"
+  train_end:            "2015-12"
+
+  # Validation / out-of-sample evaluation
+  val_start:            "2016-01"
+  val_end:              "2019-12"
+
+  # Final test / live paper-trade
+  test_start:           "2020-01"
+  test_end:             "2024-12"
+
+# ---------------------------------------------------------------------------
+#  6. ENVIRONMENT PARAMETERS
+# ---------------------------------------------------------------------------
+env:
+  # Episode configuration
+  episode_length:       36              # months per episode
+  max_universe_size:    2200            # padded action-space width (> max stocks)
+
+  # Stock Dropout (data augmentation)
+  dropout_rate:         0.20            # fraction of universe dropped per episode
+  dropout_seed:         null            # set for reproducibility; null = random
+
+  # Initial portfolio
+  initial_capital:      1.0e7           # USD 100 M notional (for impact calc)
+  initial_weights:      "cash"          # "cash" = 100 % cash.  Future: "equal", "random"
+
+  # Slippage & transaction-cost model
+  cost:
+    spread_mode:        "feature"       # "feature" = use BidAskSpread column
+    impact_eta:         1.0             # multiplier on square-root impact
+    # ── Unit Conventions (confirmed) ────────────────────────────────
+    #   DolVol       = ln(dollar volume in MILLIONS)
+    #                  → code does exp(DolVol) × 1e6 to get raw USD
+    #   BidAskSpread = decimal fraction (0.0107 = 1.07%)
+    #                  → half-spread cost = |Δw| × spread / 2
+    #   VolMkt       = annualised volatility (0.44 = 44%)
+    #                  → code converts to monthly: VolMkt / √12
+    #   ret          = simple arithmetic return (0.154 = +15.4%)
+    # ── Square-Root Impact Law ──────────────────────────────────────
+    #   σ_monthly  = VolMkt / √12
+    #   DolVol_usd = exp(DolVol) × 1e6
+    #   Impact_i   = η × σ_monthly × √( |Δw_i| × Capital / DolVol_usd )
+    #   Total cost = Σ_i Impact_i × |Δw_i|
+
+  # Reward
+  reward:
+    mode:               "active"        # "active" = net_ret − benchmark_ret
+    benchmark_missing:  0.0             # fallback when SP500 return unavailable
+
+  # Risk-free rate (applied to cash holdings)
+  riskfree:
+    enabled:            true            # false = cash earns 0
+    annualise:          false           # true if rf values are annual rates
+    # The rf column from Fama-French is already a monthly decimal rate
+    # (e.g. 0.003 = 0.3% that month).  Set annualise: true only if
+    # your rf values are annual rates that need (1+r)^(1/12) - 1.
+
+  # Delisting returns
+  delisting:
+    enabled:            true            # false = assume -100% loss on delists
+    # When enabled, uses actual CRSP dlret instead of worst-case -100%.
+    # Performance delistings (dlstcd 400-599) with missing dlret → -100%.
+    # Other delistings (mergers, exchanges) with missing dlret → 0%.
+
+# ---------------------------------------------------------------------------
+#  7. POLICY / NETWORK ARCHITECTURE
+# ---------------------------------------------------------------------------
+policy:
+  algo:                 "PPO"           # "PPO" | "TD3" | "SAC"  (see train.py)
+
+  # Shared-Weight MLP applied per-stock (Set Transformer lite)
+  stock_encoder:
+    hidden_dims:        [64, 64]        # per-stock feature encoder
+    activation:         "ReLU"
+
+  # Aggregator → Critic value head
+  critic:
+    hidden_dims:        [128, 64]
+    activation:         "ReLU"
+
+  # Actor head (outputs raw logits → masked softmax → weights)
+  actor:
+    hidden_dims:        [128, 64]
+    activation:         "ReLU"
+
+# ---------------------------------------------------------------------------
+#  8. TRAINING HYPERPARAMETERS
+# ---------------------------------------------------------------------------
+training:
+  total_timesteps:      1_000_000       # total env steps
+  n_envs:               8               # parallel envs
+  device:               "auto"          # "auto" | "cuda" | "cpu"
+  learning_rate:        3.0e-5          # ← 10× lower (was 3e-4)
+  n_steps:              360             # ← Exactly 10 episodes (36 * 10). Total buffer = 2,880.
+  batch_size:           288             # ← Exactly 10 mini-batches per epoch (288 * 10 = 2,880).
+  n_epochs:             10              # ← Increased from 5 because the buffer is now much smaller.             # ← fewer epochs per rollout (was 10)
+  gamma:                0.999
+  gae_lambda:           0.95
+  clip_range:           0.1             # ← tighter clipping (was 0.2)
+  target_kl:            0.02            # ← NEW: early-stop PPO epochs when KL > 0.02
+  ent_coef:             0.005           # ← 10× lower entropy bonus (was 0.01)
+  vf_coef:              0.5
+  max_grad_norm:        0.5
+  seed:                 42
+
+  # Evaluation during training
+  eval_freq:            25_000          # steps between eval episodes
+  n_eval_episodes:      10
+
+  # Checkpointing
+  save_freq:            100_000
+
+# ---------------------------------------------------------------------------
+#  9. WEIGHTS & BIASES
+# ---------------------------------------------------------------------------
+wandb:
+  project:              "rl-portfolio"
+  run_name:             null              # null = auto-generate "{algo}_{seed}"
+  tags:                 ["PPO", "monthly", "WRDS"]
+  # W&B API key is handled via `wandb login` on your machine.
+  # Set WANDB_MODE=offline to log locally without uploading.
