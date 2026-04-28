@@ -79,7 +79,7 @@ def main(args):
     df_long_short_test_nw = analyzer.t_test_long_short_nw(percentage= .1, lag=3)
     df_long_short_test = pd.concat([df_long_short_test, df_long_short_test_nw], ignore_index=True)
     features_importance_figs = analyzer.get_features_importance_figures()
-    history, figs = analyzer.get_history_figures()
+    #history, figs = analyzer.get_history_figures()
     # saving features importance as pickle
     features_importance = analyzer.model.get_feature_importance()
     pd.to_pickle(features_importance, "generated/features_importance.pkl")
@@ -90,10 +90,10 @@ def main(args):
             f"feature_importance/{target}": wandb.Plotly(fig)
         })
 
-    for h, fig in zip(history.keys(), figs):
-        wandb.log({
-            f"history/{h}": wandb.Plotly(fig)
-        })
+    #for h, fig in zip(history.keys(), figs):
+    #    wandb.log({
+    #        f"history/{h}": wandb.Plotly(fig)
+    #    })
 
     wandb_table = wandb.Table(dataframe=df_metrics)
     wandb.log({"test_metrics": wandb_table})

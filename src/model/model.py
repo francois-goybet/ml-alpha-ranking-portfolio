@@ -302,7 +302,7 @@ class XGBoostEnsemble(BaseRankingModel):
 
     def __init__(
         self,
-        n_estimators: int = 100,
+        n_estimators: int = 2,
         num_rounds: int = 10,
         objective: str = "rank:ndcg",
         learning_rate: float = 0.1,
