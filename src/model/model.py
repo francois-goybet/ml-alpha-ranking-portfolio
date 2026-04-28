@@ -21,37 +21,547 @@ except ImportError:
 # basically you have to provide the model the indices corresponding to the same month so it knows what
 # group of rows to compare to each other. So the dataframe should be ordered by yyyymm.
 
-# class BaseRankingModel(ABC):
-#         return self
+# ---------------------------------------------------------------------------
+# Custom eval: Rank Precision (top-decile intersection rate) — matches paper definition.
+# For each group (month), K = group_size // 10 (top 10% of stocks).
+# Rank Precision = |predicted top-decile ∩ actual top-decile| / K
+# Random baseline = 10%; good models reach 15–30% (consistent with paper Table 5).
+# ---------------------------------------------------------------------------
+
+_META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
+
+def _rank_precision_xgb(groups_list: list[list[int]]):
+    """XGBoost custom eval: rank precision at top decile.
+    groups_list[i] contains group sizes for the i-th eval dataset.
+    XGBoost calls feval once per dataset in order (train, eval, ...).
+    """
+    call_count = [0]
+
+    def eval_fn(preds: np.ndarray, dmat: "xgb.DMatrix"):
+        grps = groups_list[call_count[0] % len(groups_list)]
+        call_count[0] += 1
+        labels = dmat.get_label()
+        precisions = []
+        cursor = 0
+        for g in grps:
+            g = int(g)
+            sl = slice(cursor, cursor + g)
+            top_k = max(1, g // 10)
+            pred_top = set(np.argsort(preds[sl])[::-1][:top_k])
+            label_top = set(np.argsort(labels[sl])[::-1][:top_k])
+            precisions.append(len(pred_top & label_top) / top_k)
+            cursor += g
+        return "rank_prec@decile", float(np.mean(precisions))
+    return eval_fn
+
+def _rank_precision_lgb():
+    """LightGBM custom eval: rank precision at top decile."""
+    def eval_fn(preds: np.ndarray, dataset: "lgb.Dataset"):
+        labels = dataset.get_label()
+        groups = dataset.get_group()
+        precisions = []
+        cursor = 0
+        for g in groups:
+            g = int(g)
+            sl = slice(cursor, cursor + g)
+            top_k = max(1, g // 10)
+            pred_top = set(np.argsort(preds[sl])[::-1][:top_k])
+            label_top = set(np.argsort(labels[sl])[::-1][:top_k])
+            precisions.append(len(pred_top & label_top) / top_k)
+            cursor += g
+        return "rank_prec@decile", float(np.mean(precisions)), True
+    return eval_fn
 
 
-# class XGBoostRanker(BaseRankingModel):
-#         return self
+class BaseRankingModel(ABC):
+    """Shared interface and hyper-parameter store for all rankers."""
 
+    def __init__(
+        self,
+        num_rounds: int = 100,
+        learning_rate: float = 0.1,
+        max_depth: int = 6,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.8,
+        random_state: int = 42,
+        verbosity: int = 0,
+        eval_at: list[int] | None = None,
+    ) -> None:
+        self.num_rounds = num_rounds
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.random_state = random_state
+        self.verbosity = verbosity
+        self.eval_at = eval_at if eval_at is not None else [10, 20]
+
+    @property
+    def is_fitted(self) -> bool:
+        return hasattr(self, "model_")
+
+    @abstractmethod
+    def fit(self, X, y, groups, **kwargs): ...
+
+    @abstractmethod
+    def predict(self, X) -> np.ndarray: ...
+
+    @abstractmethod
+    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]: ...
+
+    @abstractmethod
+    def save_model(self, filepath: str) -> None: ...
+
+    @abstractmethod
+    def load_model(self, filepath: str): ...
+
+
+class XGBoostRanker(BaseRankingModel):
+    """XGBoost learning-to-rank model.
+
+    Uses ``xgb.train`` with the ``rank:pairwise`` (or ``rank:ndcg``) objective.
+    Groups are passed via the ``qid`` column of a ``DMatrix`` built from the
+    cumulative sum of ``groups``.
+    """
+
+    def __init__(
+        self,
+        num_rounds: int = 100,
+        objective: str = "rank:pairwise",
+        learning_rate: float = 0.1,
+        max_depth: int = 6,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.8,
+        random_state: int = 42,
+        verbosity: int = 0,
+        ndcg_exp_gain: bool = False,
+        eval_at: list[int] | None = None,
+        # label_encoder: convert continuous returns to integer grades per month.
+        # Built-in options: "quintile", "decile", "binary", "argsort" (default).
+        # Pass a callable f(y, groups) -> np.ndarray for a custom scheme.
+        # Set to None to skip encoding (y must already be non-negative integers).
+        label_encoder: str | callable | None = "argsort",
+    ) -> None:
+        super().__init__(
+            num_rounds=num_rounds,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            random_state=random_state,
+            verbosity=verbosity,
+            eval_at=eval_at,
+        )
+        self.objective = objective
+        self.ndcg_exp_gain = ndcg_exp_gain
+        self.label_encoder = label_encoder
+
+    def _xgb_params(self) -> dict:
+        params = {
+            "objective": self.objective,
+            "learning_rate": self.learning_rate,
+            "max_depth": self.max_depth,
+            "subsample": self.subsample,
+            "colsample_bytree": self.colsample_bytree,
+            "seed": self.random_state,
+            "verbosity": self.verbosity,
+            "eval_metric": [f"ndcg@{k}" for k in self.eval_at] + ["auc"],
+            "ndcg_exp_gain": self.ndcg_exp_gain,
+        }
+        return params
+
+    @staticmethod
+    def _build_dmatrix(
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+        groups: list[int] | np.ndarray,
+    ) -> xgb.DMatrix:
+        """Build an XGBoost DMatrix with per-row query group ids."""
+        X_arr = X.values if isinstance(X, pd.DataFrame) else X
+        y_arr = y.values if isinstance(y, pd.Series) else y
+        # qid: one integer per row identifying the group (month)
+        qid = np.repeat(np.arange(len(groups)), groups).astype(np.uint32)
+        dm = xgb.DMatrix(X_arr, label=y_arr)
+        dm.set_uint_info("group", np.array(groups, dtype=np.uint32))
+        if isinstance(X, pd.DataFrame):
+            dm.feature_names = X.columns.tolist()
+        return dm
+
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+        groups: list[int] | np.ndarray,
+        eval_set: Optional[tuple] = None,
+        eval_groups: Optional[list[int]] = None,
+        verbose: bool = False,
+    ) -> "XGBoostRanker":
+        feature_names = X.columns.tolist() if isinstance(X, pd.DataFrame) else None
+        y_s = y if isinstance(y, pd.Series) else pd.Series(y)
+
+  
+        # Encode continuous returns to integer grades if needed
+        if self.label_encoder is not None:
+            if callable(self.label_encoder) and not isinstance(self.label_encoder, str):
+                encoder_fn = self.label_encoder
+            elif self.label_encoder in _LABEL_ENCODERS:
+                encoder_fn = _LABEL_ENCODERS[self.label_encoder]
+            else:
+                raise ValueError(
+                    f"Unknown label_encoder '{self.label_encoder}'. "
+                    f"Choose from {list(_LABEL_ENCODERS)} or pass a callable."
+                )
+            y_encoded = encoder_fn(y_s, list(groups))
+        else:
+            y_encoded = y_s.values
+
+        dtrain = self._build_dmatrix(X, y_encoded, groups)
+
+        evals = [(dtrain, "train")]
+        if eval_set is not None and eval_groups is not None:
+            X_e, y_e = eval_set
+            y_e_s = y_e if isinstance(y_e, pd.Series) else pd.Series(y_e)
+            if self.label_encoder is not None:
+                y_e_encoded = encoder_fn(y_e_s, list(eval_groups))
+            else:
+                y_e_encoded = y_e_s.values
+            deval = self._build_dmatrix(X_e, y_e_encoded, eval_groups)
+            evals.append((deval, "eval"))
+
+        groups_list = [list(groups)]
+        if eval_set is not None and eval_groups is not None:
+            groups_list.append(list(eval_groups))
+
+        evals_result: dict = {}
+        self.model_ = xgb.train(
+            self._xgb_params(),
+            dtrain,
+            num_boost_round=self.num_rounds,
+            evals=evals,
+            custom_metric=_rank_precision_xgb(groups_list),
+            evals_result=evals_result,
+            verbose_eval=verbose,
+        )
+        self.feature_names_ = feature_names
+        self.training_history_ = evals_result
+        return self
+
+    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        X_arr = X.values if isinstance(X, pd.DataFrame) else X
+        dm = xgb.DMatrix(X_arr)
+        if self.feature_names_ is not None:
+            dm.feature_names = self.feature_names_
+        return self.model_.predict(dm)
+
+    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        scores = self.model_.get_score(importance_type=importance_type)
+        return scores
+
+    def save_model(self, filepath: str) -> None:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        self.model_.save_model(filepath)
+
+    def load_model(self, filepath: str) -> XGBoostRanker:
+        self.model_ = xgb.Booster()
+        self.model_.load_model(filepath)
+        return self
+
+class XGBoostEnsemble(BaseRankingModel):
+    """Ensemble of ``n_estimators`` XGBoost rankers.
+
+    Each base model is trained on a randomly drawn combination of:
+
+    * **Feature subset** — a random fraction of columns sampled uniformly
+      from ``feature_fraction`` range.
+    * **Time window** — a random contiguous sub-interval of training months
+      (requires ``yyyymm`` to be passed to ``fit``).
+    * **max_depth** — integer sampled uniformly from ``depth_range``.
+    * **learning_rate** — sampled log-uniformly from ``lr_range``.
+
+    Final prediction is the **mean** of all base-ranker scores.
+
+    Parameters
+    ----------
+    n_estimators : int
+        Number of base XGBoost models to train. Default 100.
+    feature_fraction : tuple[float, float]
+        (min, max) fraction of features each model sees. Default (0.3, 0.8).
+    depth_range : tuple[int, int]
+        (min, max) inclusive range for ``max_depth``. Default (3, 8).
+    lr_range : tuple[float, float]
+        (min, max) for ``learning_rate`` on a log scale. Default (0.01, 0.3).
+    time_fraction : tuple[float, float]
+        (min, max) fraction of training months each model uses. Default (0.5, 1.0).
+    All remaining kwargs are forwarded to XGBoostRanker as fixed hyperparameters.
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 2,
+        num_rounds: int = 10,
+        objective: str = "rank:ndcg",
+        learning_rate: float = 0.1,
+        max_depth: int = 5,
+        subsample: float = 0.8,
+        colsample_bytree: float = 0.8,
+        random_state: int = 42,
+        ndcg_exp_gain: bool = False,
+        label_encoder: str | callable | None = "argsort",
+        verbosity: int = 0,
+        feature_fraction: tuple[float, float] = (0.3, 0.8),
+        depth_range: tuple[int, int] = (3, 8),
+        lr_range: tuple[float, float] = (0.01, 0.3),
+        time_fraction: tuple[float, float] = (0.5, 1.0),
+        eval_at: list[int] | None = None,
+    ) -> None:
+        super().__init__(
+            num_rounds=num_rounds,
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            subsample=subsample,
+            colsample_bytree=colsample_bytree,
+            random_state=random_state,
+            verbosity=verbosity,
+        )
+        self.n_estimators = n_estimators
+        self.objective = objective
+        self.ndcg_exp_gain = ndcg_exp_gain
+        self.label_encoder = label_encoder
+        self.feature_fraction = feature_fraction
+        self.depth_range = depth_range
+        self.lr_range = lr_range
+        self.time_fraction = time_fraction
+
+    @property
+    def is_fitted(self) -> bool:
+        return hasattr(self, "estimators_")
+
+    def fit(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series | np.ndarray,
+        groups: list[int] | np.ndarray,
+        yyyymm: Optional[pd.Series | np.ndarray] = None,
+        eval_set: Optional[tuple] = None,
+        eval_groups: Optional[list[int]] = None,
+        verbose: bool = False,
+    ) -> "XGBoostEnsemble":
+        """Train ``n_estimators`` XGBoostRankers with randomised configs.
+
+        Args:
+            X: Feature DataFrame (column names required).
+            y: Target series (continuous returns).
+            groups: Stock counts per month.
+            yyyymm: Month identifier per row. Enables time-window sub-sampling.
+            eval_set / eval_groups: Ignored (no early stopping in ensemble members).
+            verbose: Print per-estimator summary if True.
+        """
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("X must be a pandas DataFrame (column names required).")
+
+        rng = np.random.RandomState(self.random_state)
+        all_features = X.columns.tolist()
+        n_features = len(all_features)
+        y_s = y if isinstance(y, pd.Series) else pd.Series(y, index=X.index)
+
+        yyyymm_arr = np.asarray(yyyymm) if yyyymm is not None else None
+        all_months = np.unique(yyyymm_arr) if yyyymm_arr is not None else None
+
+        self.estimators_: list[tuple[XGBoostRanker, list[str]]] = []
+
+        for i in range(self.n_estimators):
+            # --- Randomise hyperparameters ---
+            depth = int(rng.randint(self.depth_range[0], self.depth_range[1] + 1))
+            lr = float(np.exp(rng.uniform(
+                np.log(self.lr_range[0]), np.log(self.lr_range[1])
+            )))
+
+            # --- Randomise feature subset ---
+            frac = rng.uniform(self.feature_fraction[0], self.feature_fraction[1])
+            n_sel = max(1, int(round(n_features * frac)))
+            sel_idx = np.sort(rng.choice(n_features, size=n_sel, replace=False))
+            selected_features = [all_features[j] for j in sel_idx]
+
+            # --- Randomise time window ---
+            if yyyymm_arr is not None and len(all_months) > 1:
+                n_months = len(all_months)
+                t_frac = rng.uniform(self.time_fraction[0], self.time_fraction[1])
+                window = max(1, int(round(n_months * t_frac)))
+                start = int(rng.randint(0, n_months - window + 1))
+                sel_months = set(all_months[start: start + window])
+                mask = np.isin(yyyymm_arr, list(sel_months))
+                X_i = X.loc[mask, selected_features].reset_index(drop=True)
+                y_i = y_s.loc[mask].reset_index(drop=True)
+                groups_i = _recompute_groups(yyyymm_arr[mask])
+                n_months_used = window
+            else:
+                X_i = X[selected_features]
+                y_i = y_s
+                groups_i = list(groups)
+                n_months_used = len(all_months) if all_months is not None else "?"
+
+            ranker = XGBoostRanker(
+                num_rounds=self.num_rounds,
+                objective=self.objective,
+                learning_rate=lr,
+                max_depth=depth,
+                subsample=self.subsample,
+                colsample_bytree=self.colsample_bytree,
+                random_state=int(rng.randint(0, 2**31)),
+                verbosity=self.verbosity,
+                ndcg_exp_gain=self.ndcg_exp_gain,
+                label_encoder=self.label_encoder,
+            )
+            ranker.fit(X_i, y_i, groups=groups_i, verbose=False)
+            self.estimators_.append((ranker, selected_features))
+
+            if verbose:
+                print(
+                    f"  [{i + 1:3d}/{self.n_estimators}] "
+                    f"depth={depth}  lr={lr:.4f}  "
+                    f"features={n_sel}/{n_features}  months={n_months_used}"
+                )
+
+        return self
+
+    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        if not isinstance(X, pd.DataFrame):
+            raise ValueError("X must be a pandas DataFrame.")
+        scores = np.zeros(len(X), dtype=np.float64)
+        for ranker, features in self.estimators_:
+            scores += ranker.predict(X[features])
+        return scores / len(self.estimators_)
+
+    def get_feature_importance(self, importance_type: str = "gain") -> Dict[str, float]:
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        agg: Dict[str, float] = {}
+        counts: Dict[str, int] = {}
+        for ranker, _ in self.estimators_:
+            for feat, val in ranker.get_feature_importance(importance_type).items():
+                agg[feat] = agg.get(feat, 0.0) + val
+                counts[feat] = counts.get(feat, 0) + 1
+        return {f: agg[f] / counts[f] for f in agg}
+
+    def save_model(self, filepath: str) -> None:
+        raise NotImplementedError("Use pickle to save/load XGBoostEnsemble.")
+
+    def load_model(self, filepath: str) -> "XGBoostEnsemble":
+        raise NotImplementedError("Use pickle to save/load XGBoostEnsemble.")
 
 # ---------------------------------------------------------------------------
-# Label encoders for LightGBM (requires integer grades per month)
+# Label encoders — shared by XGBoostRanker and LGBMRanker
 #
-# Input data is expected as a flat DataFrame with columns:
-#   permno  (stock id), yyyymm (period), ret (return), f1, f2, ... (features)
+# Each encoder takes a flat Series y and the group sizes list, and returns
+# a np.ndarray of non-negative integers (higher = more relevant).
 # groups must be built AFTER encoding so row order is preserved:
 #   groups = df.groupby("yyyymm").size().tolist()
 # ---------------------------------------------------------------------------
 
 def encode_labels_quintile(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """Assign per-month quintile ranks 0-4 (4 = highest return)."""
+    out = np.empty(len(y), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        out[sl] = (
+            pd.qcut(y.iloc[sl], q=5, labels=False, duplicates="drop")
+            .fillna(0)
+            .astype(np.int64)
+        )
+        cursor += g
     return out
 
 
 def encode_labels_decile(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """Assign per-month decile ranks 0-9 (9 = highest return)."""
+    out = np.empty(len(y), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        out[sl] = (
+            pd.qcut(y.iloc[sl], q=10, labels=False, duplicates="drop")
+            .fillna(0)
+            .astype(np.int64)
+        )
+        cursor += g
     return out
 
 
 def encode_labels_binary(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """Assign 1 to the top half, 0 to the bottom half, per month."""
+    out = np.empty(len(y), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        median = y.iloc[sl].median()
+        out[sl] = (y.iloc[sl] >= median).astype(np.int64)
+        cursor += g
+    return out
+
+def encode_labels_argsort(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """
+    Assign per-group ranks using argsort.
+    0 = worst, higher = better.
+    """
+    out = np.empty(len(y), dtype=np.int64)
+    cursor = 0
+
+    for g in groups:
+        sl = slice(cursor, cursor + g)
+        y_group = y.iloc[sl].to_numpy()
+
+        # argsort twice = rank
+        ranks = np.argsort(np.argsort(y_group))
+
+        out[sl] = ranks
+        cursor += g
+
+    return out
+
+
+def encode_labels_long_ranker(y: pd.Series, groups: list[int]) -> np.ndarray:
+    """Dual-Ranker long-leg labeling: top-decile NDCG emphasis.
+
+    For each month:
+      - top_k = max(1, group_size // 10)   (top 10%)
+      - Best stock → label top_k, second best → top_k-1, ..., top_k-th → 1
+      - All remaining stocks → label 0
+
+    This creates a sparse relevance vector that focuses NDCG loss entirely on
+    the top decile while zeroing out mid-ranked noise.
+
+    Note for LightGBM (lambdarank): set ``label_gain`` in the model config to
+    cover values 0..top_k, e.g. ``list(range(max_group // 10 + 1))``, otherwise
+    LightGBM clips gains at label 4 by default.
+    """
+    out = np.zeros(len(y), dtype=np.int64)
+    cursor = 0
+    for g in groups:
+        top_k = max(1, g // 10)
+        y_group = y.iloc[cursor : cursor + g].to_numpy()
+        # indices sorted highest return first
+        sorted_idx = np.argsort(y_group)[::-1]
+        for rank, idx in enumerate(sorted_idx[:top_k]):
+            out[cursor + idx] = top_k - rank  # top_k, top_k-1, ..., 1
+        cursor += g
     return out
 
 
 # Registry so callers can select an encoder by name from config
 _LABEL_ENCODERS = {
+    "quintile":     encode_labels_quintile,
+    "decile":       encode_labels_decile,
+    "binary":       encode_labels_binary,
+    "argsort":      encode_labels_argsort,
+    "long_ranker":  encode_labels_long_ranker,
 }
 
 
@@ -69,6 +579,7 @@ class LGBMRanker(BaseRankingModel):
         colsample_bytree: float = 0.8,
         random_state: int = 42,
         verbosity: int = -1,
+        eval_at: list[int] | None = None,
         # --- LTR-specific ---
         lambdarank_truncation_level: int = 10,
         label_gain: Optional[list[float]] = None,
@@ -86,6 +597,7 @@ class LGBMRanker(BaseRankingModel):
             colsample_bytree=colsample_bytree,
             random_state=random_state,
             verbosity=verbosity,
+            eval_at=eval_at,
         )
         self.objective = objective
         self.num_leaves = num_leaves
@@ -106,6 +618,7 @@ class LGBMRanker(BaseRankingModel):
             "seed": self.random_state,
             "verbosity": self.verbosity,
             "lambdarank_truncation_level": self.lambdarank_truncation_level,
+            "eval_at": self.eval_at,
         }
         if self.label_gain is not None:
             params["label_gain"] = self.label_gain
@@ -161,14 +674,25 @@ class LGBMRanker(BaseRankingModel):
         if eval_set is not None and eval_groups is not None:
             X_e, y_e = eval_set
             X_e = X_e.values if isinstance(X_e, pd.DataFrame) else X_e
-            y_e = y_e.values if isinstance(y_e, pd.Series) else y_e
-            deval = lgb.Dataset(X_e, label=y_e, group=eval_groups, reference=dtrain)
+            y_e_s = y_e if isinstance(y_e, pd.Series) else pd.Series(y_e)
+            if self.label_encoder is not None:
+                y_e_arr = encoder_fn(y_e_s, list(eval_groups))
+            else:
+                y_e_arr = y_e_s.to_numpy(dtype=np.float32, na_value=0)
+            deval = lgb.Dataset(X_e, label=y_e_arr, group=eval_groups, reference=dtrain)
             valid_sets.append(deval)
             valid_names.append("eval")
 
         evals_result: dict = {}
         callbacks = [lgb.record_evaluation(evals_result)]
-        if not verbose:
+        if verbose:
+            def _fmt_callback(env):
+                row_parts = [f"[{env.iteration}]"]
+                for ds_name, metric, value, _ in sorted(env.evaluation_result_list, key=lambda x: (x[0], x[1])):
+                    row_parts.append(f"{ds_name} {metric}: {value:.4f}")
+                print("  ".join(row_parts))
+            callbacks.append(_fmt_callback)
+        else:
             callbacks.append(lgb.log_evaluation(period=-1))
 
         self.model_ = lgb.train(
@@ -177,6 +701,7 @@ class LGBMRanker(BaseRankingModel):
             num_boost_round=self.num_rounds,
             valid_sets=valid_sets,
             valid_names=valid_names,
+            feval=_rank_precision_lgb(),
             callbacks=callbacks,
         )
         self.feature_names_ = feature_names
@@ -216,28 +741,33 @@ class MultiHorizonRanker:
     """
     Trains one independent ranking model per target horizon.
 
-    Each horizon (e.g. t+1, t+3, t+6) gets its own model because the feature
+    Each horizon (t+1, t+3, t+6) gets its own model because feature
     importance and optimal hyperparameters often differ across horizons.
     All models share the same backend (xgboost or lightgbm) and hyperparameters.
 
+    Target column names match DataManager output:
+        ``["ret_1m", "ret_3m", "ret_6m"]``
+
     Args:
         targets: List of target column names, one per horizon.
-            e.g. ["return_t1", "return_t3", "return_t6"]
-        backend: "xgboost" or "lightgbm".
+            Defaults to ``["ret_1m", "ret_3m", "ret_6m"]``.
+        backend: ``"xgboost"`` or ``"lightgbm"``.
         **model_kwargs: Passed directly to XGBoostRanker or LGBMRanker.
 
-    After fit(), access individual models via .models_[target].
+    After fit(), access individual models via ``.models_[target]``.
     """
 
     def __init__(
         self,
-        targets: list[str],
+        targets: list[str] | None = None,
         backend: str = "xgboost",
         **model_kwargs,
     ):
+        if targets is None:
+            targets = ["ret_1m", "ret_3m", "ret_6m"]
         if not targets:
             raise ValueError("targets must be a non-empty list of column names.")
-        if backend not in ("xgboost", "lightgbm"):
+        if backend not in ("xgboost", "lightgbm", "ensemble"):
             raise ValueError("backend must be 'xgboost' or 'lightgbm'.")
         self.targets = targets
         self.backend = backend
@@ -248,6 +778,8 @@ class MultiHorizonRanker:
             return XGBoostRanker(**self.model_kwargs)
         if self.backend == "lightgbm":
             return LGBMRanker(**self.model_kwargs)
+        if self.backend == "ensemble":
+            return XGBoostEnsemble(**self.model_kwargs)
 
     @property
     def is_fitted(self) -> bool:
@@ -256,7 +788,7 @@ class MultiHorizonRanker:
     def fit(
         self,
         X: pd.DataFrame,
-        Y: pd.DataFrame,
+        Y: pd.DataFrame ,
         # groups: one integer per month = number of stocks in that month.
         # All target columns share the same group structure (same rows, same dates).
         # sum(groups) must equal len(X).
@@ -268,22 +800,27 @@ class MultiHorizonRanker:
         """
         Args:
             X: Feature matrix (rows = stocks × months).
-            Y: DataFrame with one column per target horizon.
-               e.g. columns ["return_t1", "return_t3", "return_t6"].
+            Y: Either a DataFrame with one column per target horizon
+               (columns must match ``self.targets``, e.g. ``["ret_1m", "ret_3m",
+               "ret_6m"]``), or a single Series / one-column DataFrame when
+               training on a single horizon.
             groups: Stock counts per month, shared across all horizons.
-            eval_set: Optional (X_val, Y_val) for monitoring.
+                Built from ``df.groupby("yyyymm").size().tolist()``.
+            eval_set: Optional ``(X_val, Y_val)`` for monitoring.
             eval_groups: Group sizes for the validation set.
         """
         missing = [t for t in self.targets if t not in Y.columns]
         if missing:
             raise ValueError(f"Target columns not found in Y: {missing}")
 
+        feature_cols = [c for c in X.columns if c not in _META]
+
         self.models_: Dict[str, BaseRankingModel] = {}
         for target in self.targets:
             model = self._make_model()
-            es = (eval_set[0], eval_set[1][target]) if eval_set is not None else None
+            es = (eval_set[0][feature_cols], eval_set[1][target]) if eval_set is not None else None
             model.fit(
-                X,
+                X[feature_cols],
                 Y[target],
                 groups=groups,
                 eval_set=es,
@@ -300,7 +837,8 @@ class MultiHorizonRanker:
         """Returns a dict {target: score_array} for each horizon."""
         if not self.is_fitted:
             raise ValueError("Call fit() first.")
-        return {target: model.predict(X) for target, model in self.models_.items()}
+        feature_cols = [c for c in X.columns if c not in _META]
+        return {target: model.predict(X[feature_cols]) for target, model in self.models_.items()}
 
     def get_feature_importance(
         self, importance_type: str = "gain"
@@ -313,6 +851,11 @@ class MultiHorizonRanker:
             for target, model in self.models_.items()
         }
 
+    def get_history(self) -> Dict[str, dict]:
+        """Returns training history (eval metrics per iteration) for each horizon."""
+        if not self.is_fitted:
+            raise ValueError("Call fit() first.")
+        return {target: model.training_history_ for target, model in self.models_.items()}
 
 # ---------------------------------------------------------------------------
 # Horizon ensemble — combines scores across horizons
