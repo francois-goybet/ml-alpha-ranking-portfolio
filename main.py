@@ -1,6 +1,5 @@
 import argparse
 
-import numpy as np
 import pandas as pd
 
 from src.config.config_loader import load_config
@@ -52,7 +51,6 @@ def main(args):
 
     # Model training
     model_cfg = config.get("model", {})
-    targets = model_cfg.get("targets", ["ret_1m", "ret_3m", "ret_6m"])
     verbose = config.get("pipeline", {}).get("verbose", True)
     
     model = MultiHorizonRanker(**model_cfg)
@@ -115,7 +113,6 @@ def main(args):
     portfolio_analyzer = PortfolioAnalyzer(rf_df, ret_sp500, X_test, y_test)
     
     strategies = config.get("strategies", ["top_1"])
-    strategy_dfs = {}
     bps = config.get("pipeline", {}).get("bps", 10)
     for strategy_name in strategies:
         print(f"Evaluating strategy: {strategy_name}")
@@ -124,6 +121,7 @@ def main(args):
             raise ValueError(f"Strategy '{strategy_name}' not found in PortfolioConstruction.")
         strategy_df = strategy_fn()
         pnl, dropdown, metrics, sp_500_ols_metrics = portfolio_analyzer.pnl_custom_strategy(strategy_df, strategy_name=strategy_name, bps=bps)
+        ff5_metrics = portfolio_analyzer.ff5_regression(strategy_name)
         wandb.log({
             f"{strategy_name}_pnl": wandb.Plotly(pnl),
             f"{strategy_name}_drawdown": wandb.Plotly(dropdown)
@@ -134,6 +132,8 @@ def main(args):
         wandb.log({f"{strategy_name}_weights": wandb_table_strategy})
         wandb_table_sp500_ols_metrics = wandb.Table(dataframe=pd.DataFrame([sp_500_ols_metrics]))
         wandb.log({f"{strategy_name}_sp500_ols_metrics": wandb_table_sp500_ols_metrics})
+        wandb_table_ff5 = wandb.Table(dataframe=pd.DataFrame([ff5_metrics]))
+        wandb.log({f"{strategy_name}_ff5_metrics": wandb_table_ff5})
 
     # Saving this dict to analyze later which strategy had which weights and performance
     all_strategy_data = portfolio_analyzer.all_strategy_data
@@ -141,6 +141,19 @@ def main(args):
     
     # Saving results to Weights & Biases
 
+
+    # Drawdown diagnostics
+    pipe_cfg = config.get("pipeline", {})
+    dd_start = pipe_cfg.get("drawdown_start")
+    dd_end   = pipe_cfg.get("drawdown_end")
+    if dd_start and dd_end:
+        dd_figs = analyzer.diagnose_drawdown(
+            start_yyyymm=int(dd_start),
+            end_yyyymm=int(dd_end),
+            rolling_window=int(pipe_cfg.get("drawdown_rolling_window", 12)),
+        )
+        for name, fig in dd_figs.items():
+            wandb.log({f"drawdown_diagnostics/{name}": wandb.Plotly(fig)})
 
     wandb.finish()
 

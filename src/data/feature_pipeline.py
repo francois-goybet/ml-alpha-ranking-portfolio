@@ -120,7 +120,8 @@ class FeaturePipeline:
         features = self._impute(features, fit=True)
         sector = meta["sector"] if "sector" in meta.columns else None
         features = self._scale(features, sector, fit=True)
-        features = self._fit_ridge(features, y)
+        yyyymm_series = meta["yyyymm"] if "yyyymm" in meta.columns else None
+        features = self._fit_ridge(features, y, yyyymm=yyyymm_series)
         # features = self._fit_autoencoder(features)
         features = self._apply_pca(features, fit=True)
 
@@ -346,28 +347,69 @@ class FeaturePipeline:
         self,
         X: pd.DataFrame,
         y: pd.DataFrame | None,
+        yyyymm: "pd.Series | None" = None,
     ) -> pd.DataFrame:
-        """Fit one Ridge regressor per target and add predictions as features."""
+        """Fit one Ridge regressor per target and add predictions as features.
+
+        When ``yyyymm`` is provided, uses a walk-forward scheme: for each month
+        t the Ridge is re-fit on all rows with month < t, so the feature value
+        for month t never sees future returns.  Months with fewer than
+        ``min_train_months`` of history are left as NaN (imputed downstream).
+
+        In both cases, a Ridge fit on the full training set is stored in
+        ``self._ridge_models`` for use by ``_apply_ridge`` on val/test data.
+        """
         ridge_cfg = self.cfg.get("ridge_features", None)
         if ridge_cfg is None or y is None:
             return X
+        import numpy as np
         from sklearn.linear_model import Ridge
         targets = ridge_cfg.get("targets", [])
         alpha = ridge_cfg.get("alpha", 1.0)
+        min_train_months = ridge_cfg.get("min_train_months", 24)
         self._ridge_models = {}
         X_arr = X.fillna(0).values
-        for target in targets:
-            if target not in y.columns:
-                continue
-            y_t = y[target].fillna(0).values
-            ridge = Ridge(alpha=alpha)
-            ridge.fit(X_arr, y_t)
-            self._ridge_models[target] = ridge
-            X = X.copy()
-            X[f"ridge_{target}"] = ridge.predict(X_arr)
-        if self._ridge_models:
-            print(f"  [FeaturePipeline] Ridge features added: {list(self._ridge_models.keys())}")
-        return X
+
+        if yyyymm is not None:
+            yyyymm_arr = np.asarray(yyyymm)
+            unique_months = np.unique(yyyymm_arr)
+            X_out = X.copy()
+            for target in targets:
+                if target not in y.columns:
+                    continue
+                y_t = y[target].fillna(0).values
+                col = f"ridge_{target}"
+                X_out[col] = np.nan
+                for month in unique_months:
+                    past_mask = yyyymm_arr < month
+                    if past_mask.sum() == 0:
+                        continue
+                    past_months_count = len(np.unique(yyyymm_arr[past_mask]))
+                    if past_months_count < min_train_months:
+                        continue
+                    curr_mask = yyyymm_arr == month
+                    ridge = Ridge(alpha=alpha)
+                    ridge.fit(X_arr[past_mask], y_t[past_mask])
+                    X_out.loc[curr_mask, col] = ridge.predict(X_arr[curr_mask])
+                # Full-train Ridge stored for val/test via _apply_ridge
+                ridge_full = Ridge(alpha=alpha)
+                ridge_full.fit(X_arr, y_t)
+                self._ridge_models[target] = ridge_full
+            print(f"  [FeaturePipeline] Ridge features (walk-forward) added: {targets}")
+            return X_out
+        else:
+            for target in targets:
+                if target not in y.columns:
+                    continue
+                y_t = y[target].fillna(0).values
+                ridge = Ridge(alpha=alpha)
+                ridge.fit(X_arr, y_t)
+                self._ridge_models[target] = ridge
+                X = X.copy()
+                X[f"ridge_{target}"] = ridge.predict(X_arr)
+            if self._ridge_models:
+                print(f"  [FeaturePipeline] Ridge features added: {list(self._ridge_models.keys())}")
+            return X
 
     def _apply_ridge(self, X: pd.DataFrame) -> pd.DataFrame:
         """Apply fitted Ridge models to val/test."""

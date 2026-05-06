@@ -1,6 +1,7 @@
 from typing import Optional
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 from scipy import stats
 from src.model.model import MultiHorizonRanker, HorizonEnsemble
 from sklearn.metrics import roc_auc_score
@@ -22,7 +23,7 @@ class RankingAnalyzer:
         model: A fitted MultiHorizonRanker instance.
         ensemble: A fitted HorizonEnsemble instance.
         X_test: Test feature matrix (DataFrame).
-        group_test: List of stock counts per month in test set.
+        group_test: List ofw stock counts per month in test set.
         y_test: Test target DataFrame with columns matching model.targets.
     """
     
@@ -370,3 +371,212 @@ class RankingAnalyzer:
         top_k_pred = set(np.argsort(scores)[::-1][:k])
         top_k_actual = set(np.argsort(labels)[::-1][:k])
         return len(top_k_pred & top_k_actual) / k
+
+    # ------------------------------------------------------------------
+    # Drawdown diagnostics
+    # ------------------------------------------------------------------
+
+    def diagnose_drawdown(
+        self,
+        start_yyyymm: int,
+        end_yyyymm: int,
+        rolling_window: int = 12,
+        top_pct: float = 0.1,
+    ) -> dict[str, go.Figure]:
+        """Four diagnostic plots for a drawdown period.
+
+        Parameters
+        ----------
+        start_yyyymm / end_yyyymm : int
+            YYYYMM integers defining the drawdown window (e.g. 202003, 202006).
+            The window is shaded in red on every plot.
+        rolling_window : int
+            Months used for rolling Spearman and rolling FF5 regressions.
+        top_pct : float
+            Fraction defining "top" stocks each month (default 0.10 = top decile).
+
+        Returns
+        -------
+        dict with four Plotly figures keyed by:
+            "precision"           – monthly Precision@decile
+            "spearman"            – rolling Spearman ρ (score vs realized return)
+            "returns_comparison"  – model top-decile vs actual top-decile returns
+            "rolling_ff5"         – rolling FF5 factor betas
+        """
+        from src.portfolio.PortfolioAnalyzer import _load_ff5_factors
+
+        scores = self.ensemble.predict(self.X_test, groups=list(self.group_test))
+        y_ref  = self.y_test.iloc[:, 0].to_numpy()
+        yyyymm_arr = self.X_test["yyyymm"].to_numpy().astype(int)
+
+        # ── Per-month metrics ──────────────────────────────────────────
+        months, precision_vals, spearman_vals = [], [], []
+        model_top_ret, actual_top_ret = [], []
+
+        cursor = 0
+        for g in self.group_test:
+            sl   = slice(cursor, cursor + g)
+            month = int(yyyymm_arr[cursor])
+            s, r  = scores[sl], y_ref[sl]
+            k     = max(1, int(g * top_pct))
+
+            pred_top   = set(np.argsort(s)[::-1][:k])
+            actual_top = set(np.argsort(r)[::-1][:k])
+
+            months.append(month)
+            precision_vals.append(len(pred_top & actual_top) / k)
+            spearman_vals.append(stats.spearmanr(s, r).statistic)
+            model_top_ret.append(float(r[np.argsort(s)[::-1][:k]].mean()))
+            actual_top_ret.append(float(r[np.argsort(r)[::-1][:k]].mean()))
+            cursor += g
+
+        df = pd.DataFrame({
+            "yyyymm":        months,
+            "date":          pd.to_datetime([str(m) for m in months], format="%Y%m"),
+            "precision":     precision_vals,
+            "spearman":      spearman_vals,
+            "model_top_ret": model_top_ret,
+            "actual_top_ret":actual_top_ret,
+        })
+        df["rolling_spearman"] = df["spearman"].rolling(rolling_window, min_periods=3).mean()
+
+        d0 = pd.to_datetime(str(start_yyyymm), format="%Y%m")
+        d1 = pd.to_datetime(str(end_yyyymm),   format="%Y%m")
+
+        def shade(fig):
+            fig.add_vrect(x0=d0, x1=d1, fillcolor="red", opacity=0.12, line_width=0)
+
+        # ── Plot 1: Monthly Precision@decile ───────────────────────────
+        fig1 = go.Figure()
+        fig1.add_trace(go.Scatter(
+            x=df["date"], y=df["precision"],
+            mode="lines", name=f"Precision@{int(top_pct*100)}%",
+            line=dict(color="#2196F3"),
+        ))
+        fig1.add_hline(y=top_pct, line_dash="dash", line_color="grey",
+                       annotation_text=f"random baseline ({top_pct:.0%})")
+        shade(fig1)
+        fig1.update_layout(
+            title=f"Monthly Precision@{int(top_pct*100)}% — drawdown {start_yyyymm}→{end_yyyymm}",
+            xaxis_title="Month", yaxis_title="Precision",
+            yaxis=dict(tickformat=".0%"), template="plotly_white",
+        )
+
+        # ── Plot 2: Rolling Spearman correlation ───────────────────────
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=df["date"], y=df["rolling_spearman"],
+            mode="lines", name=f"{rolling_window}m rolling Spearman ρ",
+            line=dict(color="#4CAF50"),
+        ))
+        fig2.add_hline(y=0, line_dash="dash", line_color="grey")
+        shade(fig2)
+        fig2.update_layout(
+            title=f"Rolling {rolling_window}m Spearman ρ (score vs realized return)",
+            xaxis_title="Month", yaxis_title="Spearman ρ", template="plotly_white",
+        )
+
+        # ── Plot 3: Model top-decile return vs actual top-decile return ─
+        fig3 = go.Figure()
+        fig3.add_trace(go.Scatter(
+            x=df["date"], y=df["model_top_ret"],
+            mode="lines", name="Model top-decile (realized)",
+            line=dict(color="#FF5722"),
+        ))
+        fig3.add_trace(go.Scatter(
+            x=df["date"], y=df["actual_top_ret"],
+            mode="lines", name="Actual top-decile (oracle)",
+            line=dict(color="#9C27B0", dash="dot"),
+        ))
+        fig3.add_hline(y=0, line_dash="dash", line_color="grey")
+        shade(fig3)
+        fig3.update_layout(
+            title="Model top-decile vs oracle top-decile — mean monthly return",
+            xaxis_title="Month", yaxis_title="Mean return",
+            yaxis=dict(tickformat=".2%"), template="plotly_white",
+        )
+
+        # ── Plot 4: Rolling FF5 betas ──────────────────────────────────
+        ff5 = _load_ff5_factors()
+        ff5 = ff5.rename(columns={"yyyymm": "yyyymm"})
+
+        port = df[["yyyymm", "model_top_ret"]].copy()
+        port = port.merge(ff5, on="yyyymm", how="inner")
+        port["excess_ret"] = port["model_top_ret"] - port["RF"]
+        port["date"] = pd.to_datetime(port["yyyymm"].astype(str), format="%Y%m")
+
+        factors = ["Mkt_RF", "SMB", "HML", "RMW", "CMA"]
+        factor_colors = {"Mkt_RF": "#1976D2", "SMB": "#388E3C",
+                         "HML": "#F57C00", "RMW": "#7B1FA2", "CMA": "#D32F2F"}
+
+        n = len(port)
+        roll_betas = {f: [np.nan] * n for f in factors}
+        roll_alpha = [np.nan] * n
+
+        for i in range(rolling_window - 1, n):
+            w = port.iloc[i - rolling_window + 1 : i + 1]
+            X_w = sm.add_constant(w[factors].astype(float))
+            y_w = w["excess_ret"].astype(float)
+            try:
+                res = sm.OLS(y_w, X_w).fit()
+                roll_alpha[i] = res.params["const"]
+                for f in factors:
+                    roll_betas[f][i] = res.params[f]
+            except Exception:
+                pass
+
+        fig4 = go.Figure()
+        fig4.add_trace(go.Scatter(
+            x=port["date"], y=roll_alpha,
+            mode="lines", name="Alpha",
+            line=dict(color="black", dash="dot"),
+        ))
+        for f in factors:
+            fig4.add_trace(go.Scatter(
+                x=port["date"], y=roll_betas[f],
+                mode="lines", name=f,
+                line=dict(color=factor_colors[f]),
+            ))
+        fig4.add_hline(y=0, line_dash="dash", line_color="grey")
+        shade(fig4)
+        fig4.update_layout(
+            title=f"Rolling {rolling_window}m FF5 betas — model top-decile portfolio",
+            xaxis_title="Month", yaxis_title="Coefficient", template="plotly_white",
+        )
+
+        # ── Plot 5: Precision distribution (histogram) ────────────────
+        fig5 = go.Figure()
+        fig5.add_trace(go.Histogram(
+            x=df["precision"],
+            nbinsx=20,
+            name="All months",
+            marker_color="#2196F3", opacity=0.7,
+        ))
+        drawdown_mask = (df["yyyymm"] >= start_yyyymm) & (df["yyyymm"] <= end_yyyymm)
+        if drawdown_mask.any():
+            fig5.add_trace(go.Histogram(
+                x=df.loc[drawdown_mask, "precision"],
+                nbinsx=20,
+                name="Drawdown months",
+                marker_color="red", opacity=0.7,
+            ))
+        fig5.add_vline(
+            x=top_pct, line_dash="dash", line_color="grey",
+            annotation_text=f"random ({top_pct:.0%})", annotation_position="top right",
+        )
+        fig5.update_layout(
+            barmode="overlay",
+            title=f"Distribution of monthly Precision@{int(top_pct*100)}%",
+            xaxis_title=f"Precision@{int(top_pct*100)}%",
+            yaxis_title="Number of months",
+            xaxis=dict(tickformat=".0%"),
+            template="plotly_white",
+        )
+
+        return {
+            "precision":              fig1,
+            "spearman":               fig2,
+            "returns_comparison":     fig3,
+            "rolling_ff5":            fig4,
+            "precision_distribution": fig5,
+        }

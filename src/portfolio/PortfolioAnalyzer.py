@@ -1,8 +1,62 @@
+import io
+import os
+import zipfile
+
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from src.visualization.portfolio_plots import plot_pnl, plot_drawdown
+import requests
 import statsmodels.api as sm
+
+from src.visualization.portfolio_plots import plot_pnl, plot_drawdown
+
+_FF5_URL = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_5_Factors_2x3_CSV.zip"
+_FF5_CACHE = "data/ff5_factors.parquet"
+
+
+def _load_ff5_factors() -> pd.DataFrame:
+    """Download (and cache) the Fama-French 5-factor monthly data.
+
+    Returns a DataFrame indexed by ``yyyymm`` (int) with columns
+    Mkt_RF, SMB, HML, RMW, CMA, RF — all as decimals (divided by 100).
+    """
+    if os.path.exists(_FF5_CACHE):
+        return pd.read_parquet(_FF5_CACHE)
+
+    resp = requests.get(_FF5_URL, timeout=30)
+    resp.raise_for_status()
+
+    with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
+        csv_name = [n for n in z.namelist() if n.endswith(".CSV") or n.endswith(".csv")][0]
+        raw = z.read(csv_name).decode("utf-8", errors="replace")
+
+    # The file has a text header, then monthly data, then "Annual Factors:" section.
+    # Monthly rows have a 6-digit YYYYMM date; annual rows have a 4-digit year.
+    rows = []
+    in_monthly = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(",") and "Mkt-RF" in line:
+            in_monthly = True
+            continue
+        if in_monthly:
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 7 and len(parts[0]) == 6 and parts[0].isdigit():
+                rows.append(parts[:7])
+            elif len(parts[0]) == 4 and parts[0].isdigit():
+                break  # reached annual section
+
+    df = pd.DataFrame(rows, columns=["yyyymm", "Mkt_RF", "SMB", "HML", "RMW", "CMA", "RF"])
+    df["yyyymm"] = df["yyyymm"].astype(int)
+    for col in ["Mkt_RF", "SMB", "HML", "RMW", "CMA", "RF"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce") / 100.0
+    df = df.dropna().reset_index(drop=True)
+
+    os.makedirs(os.path.dirname(_FF5_CACHE), exist_ok=True)
+    df.to_parquet(_FF5_CACHE, index=False)
+    return df
 
 class PortfolioAnalyzer:
 
@@ -202,4 +256,47 @@ class PortfolioAnalyzer:
         drawdown_fig = plot_drawdown(df_drawdown, title=strategy_name + " Drawdown")
 
         return pnl_fig, drawdown_fig, metrics_df, sp_500_ols_metrics
+
+    def ff5_regression(self, strategy_name: str) -> dict:
+        """Regress a strategy's excess returns on the Fama-French 5 factors.
+
+        Requires ``pnl_custom_strategy`` to have been called first for this
+        strategy so that monthly net returns are stored in ``all_strategy_data``.
+
+        Returns a dict with alpha, factor betas, t-stats, p-values, R², adj-R².
+        Factor columns: Mkt_RF, SMB, HML, RMW, CMA.
+        """
+        if strategy_name not in self.all_strategy_data:
+            raise ValueError(f"Strategy '{strategy_name}' not found. Call pnl_custom_strategy first.")
+
+        # Reconstruct monthly net returns from stored wealth series
+        pnl_df = self.all_strategy_data[strategy_name]["pnl"].copy()
+        pnl_df["yyyymm"] = pnl_df["yyyymm"].astype(int)
+        pnl_df["net_ret"] = pnl_df["wealth"].pct_change().fillna(pnl_df["wealth"].iloc[0] - 1)
+
+        ff5 = _load_ff5_factors()
+        ff5 = ff5[ff5["yyyymm"].between(pnl_df["yyyymm"].min(), pnl_df["yyyymm"].max())]
+
+        merged = pnl_df.merge(ff5, on="yyyymm", how="inner")
+        merged["excess_ret"] = merged["net_ret"] - merged["RF"]
+
+        factors = ["Mkt_RF", "SMB", "HML", "RMW", "CMA"]
+        X = sm.add_constant(merged[factors].astype(float))
+        y = merged["excess_ret"].astype(float)
+        result = sm.OLS(y, X).fit()
+
+        out = {
+            "ff5_alpha":         result.params["const"],
+            "ff5_alpha_tstat":   result.tvalues["const"],
+            "ff5_alpha_pvalue":  result.pvalues["const"],
+            "ff5_r2":            result.rsquared,
+            "ff5_adj_r2":        result.rsquared_adj,
+        }
+        for f in factors:
+            out[f"ff5_beta_{f}"]   = result.params[f]
+            out[f"ff5_tstat_{f}"]  = result.tvalues[f]
+            out[f"ff5_pvalue_{f}"] = result.pvalues[f]
+
+        self.all_strategy_data[strategy_name]["ff5_metrics"] = out
+        return out
     

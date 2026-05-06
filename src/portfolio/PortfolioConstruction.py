@@ -110,12 +110,7 @@ class PortfolioConstruction:
         )
 
         # market cap weighting inside each month
-        def normalize_weights(df):
-            df = df.copy()
-            df["weight"] = df["market_cap_musd"] / df["market_cap_musd"].sum()
-            return df
-
-        top10 = top10.groupby("yyyymm", group_keys=False).apply(normalize_weights)
+        top10["weight"] = top10["market_cap_musd"] / top10.groupby("yyyymm")["market_cap_musd"].transform("sum")
 
         return top10[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "permno"]
@@ -144,12 +139,7 @@ class PortfolioConstruction:
         )
 
         # market cap weighting per month
-        def normalize_weights(df):
-            df = df.copy()
-            df["weight"] = df["market_cap_musd"] / df["market_cap_musd"].sum()
-            return df
-
-        topN = topN.groupby("yyyymm", group_keys=False).apply(normalize_weights)
+        topN["weight"] = topN["market_cap_musd"] / topN.groupby("yyyymm")["market_cap_musd"].transform("sum")
 
         return topN[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "permno"]
@@ -173,14 +163,10 @@ class PortfolioConstruction:
                 .copy()
         )
 
-        def normalize_score_weights(df):
-            df = df.copy()
-            shifted = df["score"] - df["score"].min()
-            total = shifted.sum()
-            df["weight"] = shifted / total if total > 0 else 1.0 / len(df)
-            return df
-
-        topN = topN.groupby("yyyymm", group_keys=False).apply(normalize_score_weights)
+        shifted = topN["score"] - topN.groupby("yyyymm")["score"].transform("min")
+        total = topN.groupby("yyyymm")["score"].transform(lambda s: (s - s.min()).sum())
+        topN["weight"] = shifted / total.where(total > 0, other=1.0)
+        topN.loc[total <= 0, "weight"] = 1.0 / topN.groupby("yyyymm")["score"].transform("count")
 
         return topN[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "permno"]

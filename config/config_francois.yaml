@@ -11,18 +11,31 @@ data:
   top_market_cap: 500       # keep top-500 by market cap per month; null = all
 
 model:
-  backend: ensemble
-  targets: [ret_1m, ret_3m, ret_6m]
-  label_encoder: argsort
-  objective: rank:ndcg
-  num_rounds: 10
+  backend: catboost_stack
+  targets: [ret_1m]
+  # Label encoding: top 10% per month get descending ranks, rest get 0
+  # Downsampling matches bottom sample count to top-decile count per group
+  label_encoder: top_decile
+  downsample_top_k: 1         # any non-null value activates downsampling
+  # Layer counts
+  n_estimators_l1: 5
+  n_estimators_l2: 5
+  n_folds: 5
+  # CatBoost hyperparams (YetiRank, 50 rounds, stop if no gain for 10)
+  num_rounds: 50
+  early_stopping_rounds: 10
   learning_rate: 0.1
   max_depth: 5
-  subsample: 0.6
-  colsample_bytree: 0.6
-  random_state: 98
-  eval_at: [20, 30, 50]
-  verbosity: 0
+  subsample: 0.8
+  colsample_bytree: 0.8
+  l2_leaf_reg: 3.0
+  random_state: 1234
+  verbosity: 2
+  # Feature subsampling ranges [min, max]
+  feature_fraction: [0.3, 0.8]
+  meta_feature_fraction: [0.5, 1.0]
+  # Exclude globally-fit ridge features from L1 to avoid look-ahead in OOF
+  l1_exclude_cols: [ridge_ret_1m]
 
 
 pipeline:
@@ -31,33 +44,25 @@ pipeline:
   verbose: true          # show boosting round logs during training
   bps: 10                 # basis points for transaction cost in backtest (bps = % / 100)
   experiment_name: 'ensemble score-weighted'
+  drawdown_start: 202109  # YYYYMM — window to highlight in drawdown diagnostics
+  drawdown_end:   202405
+  drawdown_rolling_window: 12
 
 strategies: [rf_only, all_top_1, all_top_10_equal_weights, top_10_market_cap, top_20_market_cap, top_50_market_cap, top_100_market_cap, top_10_score_weighted, top_20_score_weighted, top_50_score_weighted]
 
 feature_pipeline:
   cross_sectional_rank: False   # rank-normalise each feature within each month to [0, 1]
-  winsorize: 0.1      # clip at 1st/99th percentile per month
-  impute: median               # fill NaNs with per-feature train median
-  scale: standard       # standardize features within each sector
+  winsorize: 0.01      # clip at 1st/99th percentile per month
+  impute: zero               # fill NaNs with per-feature train median
+  scale: null       # standardize features within each sector
   drop_low_variance: 0.0       # drop constant features
   pca: null                    # no PCA
   centroid_feature: False       # add L2 distance to monthly centroid as a feature
   ridge_features:
-    targets: [ret_1m, ret_3m, ret_6m]
-    alpha: 1          # Ridge regularisation strength
-  autoencoder:
-    hidden_dims: [32, 16, 8]
-    variational: true
-    beta: 1.0          # or e.g. 4.0 for beta-VAE
-    epochs: 50
-    batch_size: 512
-    lr: 1e-3
-    weight_decay: 1e-5
-    dropout: 0.1
-    replace_features: False      # true → keep only latent cols; false → append
-    device: "mps"                # "mps" for Apple Silicon
+    targets: [ret_1m]
+    alpha: 100      # Ridge regularisation strength
 
 ensemble:
   enabled: true
-  combination: mean_rank   # "mean_rank" (Borda count) or "mean_score"
-  weights: [1, 0, 0] # ret_1m, ret_3m, ret_6m — null for equal weights
+  combination: mean_rank
+  weights: null              # single target — no weighting needed
