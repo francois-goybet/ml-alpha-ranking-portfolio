@@ -21,6 +21,9 @@ class PortfolioConstruction:
             "top_20_market_cap": lambda: self.strategy_top_N_market_cap(N=20),
             "top_50_market_cap": lambda: self.strategy_top_N_market_cap(N=50),
             "top_100_market_cap": lambda: self.strategy_top_N_market_cap(N=100),
+            "top_10_score_weighted": lambda: self.strategy_top_N_score_weighted(N=10),
+            "top_20_score_weighted": lambda: self.strategy_top_N_score_weighted(N=20),
+            "top_50_score_weighted": lambda: self.strategy_top_N_score_weighted(N=50),
         }
 
     def strategy_rf_only(self) -> pd.DataFrame:
@@ -147,6 +150,37 @@ class PortfolioConstruction:
             return df
 
         topN = topN.groupby("yyyymm", group_keys=False).apply(normalize_weights)
+
+        return topN[["yyyymm", "permno", "weight"]].sort_values(
+            ["yyyymm", "permno"]
+        ).reset_index(drop=True)
+
+    def strategy_top_N_score_weighted(self, N: int = 10) -> pd.DataFrame:
+        """
+        For each month:
+        - Select top-N stocks by y_pred score
+        - Shift scores so the minimum within the selection is 0
+        - Normalize shifted scores to sum to 1 (score-proportional weights)
+        """
+        base = self.X_test[["yyyymm", "permno"]].copy()
+        base["score"] = self.y_pred
+        base = base[base["permno"] != -1]
+
+        topN = (
+            base.sort_values(["yyyymm", "score"], ascending=[True, False])
+                .groupby("yyyymm")
+                .head(N)
+                .copy()
+        )
+
+        def normalize_score_weights(df):
+            df = df.copy()
+            shifted = df["score"] - df["score"].min()
+            total = shifted.sum()
+            df["weight"] = shifted / total if total > 0 else 1.0 / len(df)
+            return df
+
+        topN = topN.groupby("yyyymm", group_keys=False).apply(normalize_score_weights)
 
         return topN[["yyyymm", "permno", "weight"]].sort_values(
             ["yyyymm", "permno"]

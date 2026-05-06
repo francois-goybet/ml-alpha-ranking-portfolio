@@ -147,7 +147,9 @@ class RankingAnalyzer:
     
     def get_history_figures(self):
         history = self.model.get_history()
-        figs = plot_history(history)
+        # Ensemble models return empty histories — skip plotting
+        has_curves = any(bool(v) for v in history.values())
+        figs = plot_history(history) if has_curves else []
         return history, figs
 
     def get_features_importance_figures(self):

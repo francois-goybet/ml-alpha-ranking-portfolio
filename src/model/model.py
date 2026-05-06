@@ -28,6 +28,16 @@ except ImportError:
 # Random baseline = 10%; good models reach 15–30% (consistent with paper Table 5).
 # ---------------------------------------------------------------------------
 
+def _recompute_groups(yyyymm_arr) -> list[int]:
+    """Return stock counts per month from a (masked) yyyymm array.
+
+    Equivalent to df.groupby("yyyymm").size().tolist() but works on a plain
+    numpy array. Month order is preserved because yyyymm values are
+    lexicographically sortable date strings (e.g. "199001").
+    """
+    _, counts = np.unique(yyyymm_arr, return_counts=True)
+    return counts.tolist()
+
 _META = {"permno", "yyyymm", "ret", "market_cap_musd", "sector", "ret_1m", "ret_3m", "ret_6m"}
 
 def _rank_precision_xgb(groups_list: list[list[int]]):
@@ -427,6 +437,7 @@ class XGBoostEnsemble(BaseRankingModel):
                     f"features={n_sel}/{n_features}  months={n_months_used}"
                 )
 
+        self.training_history_ = {}
         return self
 
     def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
@@ -819,6 +830,9 @@ class MultiHorizonRanker:
         for target in self.targets:
             model = self._make_model()
             es = (eval_set[0][feature_cols], eval_set[1][target]) if eval_set is not None else None
+            extra = {}
+            if self.backend == "ensemble" and "yyyymm" in X.columns:
+                extra["yyyymm"] = X["yyyymm"]
             model.fit(
                 X[feature_cols],
                 Y[target],
@@ -826,6 +840,7 @@ class MultiHorizonRanker:
                 eval_set=es,
                 eval_groups=eval_groups,
                 verbose=verbose,
+                **extra,
             )
             self.models_[target] = model
         return self
